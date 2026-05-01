@@ -1,0 +1,2481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+<!-- ═══════════════════════════════════════════════════════
+     FIREBASE CONFIG — FILL YOUR DETAILS BELOW
+     Firebase Console → Project Settings → Your Apps → Web SDK
+═══════════════════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, serverTimestamp }
+                                  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ▼▼▼ PASTE YOUR FIREBASE CONFIG HERE ▼▼▼
+  const firebaseConfig = {
+    apiKey:            "YOUR_API_KEY",
+    authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
+    projectId:         "YOUR_PROJECT_ID",
+    storageBucket:     "YOUR_PROJECT_ID.appspot.com",
+    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+    appId:             "YOUR_APP_ID"
+  };
+  // ▲▲▲ PASTE YOUR FIREBASE CONFIG HERE ▲▲▲
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  async function validateLicense(key) {
+    if (!key || !key.trim()) return { valid:false, reason:'NO_KEY' };
+    const clean = key.trim().toUpperCase();
+    try {
+      const ref  = doc(db, 'licenses', clean);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return { valid:false, reason:'INVALID_KEY' };
+      const data = snap.data();
+      if (!data.isActive) return { valid:false, reason:'REVOKED', data };
+      const now    = new Date();
+      const expiry = data.expiryDate?.toDate ? data.expiryDate.toDate() : new Date(data.expiryDate);
+      const expired = now > expiry;
+      try {
+        await updateDoc(ref, { lastValidated:serverTimestamp(), activationCount:(data.activationCount||0)+1 });
+      } catch(e) { /* non-critical */ }
+      return { valid:true, readOnly:expired, reason:expired?'EXPIRED':'OK', data:{...data, expiryDate:expiry} };
+    } catch(e) {
+      if (e.code==='unavailable'||e.message?.includes('offline')) return { valid:false, reason:'OFFLINE' };
+      return { valid:false, reason:'ERROR', message:e.message };
+    }
+  }
+
+
+  // ── ADMIN: List all users ──────────────────────────────
+  window.__spcListUsers = async function() {
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch(e) { return []; }
+  };
+
+  // ── ADMIN: Create user ─────────────────────────────────
+  window.__spcCreateUser = async function(userData) {
+    try {
+      const id = userData.email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      await setDoc(doc(db, 'users', id), {
+        ...userData,
+        createdAt: serverTimestamp(),
+        isActive: true
+      });
+      return { success: true, id };
+    } catch(e) { return { success: false, error: e.message }; }
+  };
+
+  // ── ADMIN: Update user ─────────────────────────────────
+  window.__spcUpdateUser = async function(id, data) {
+    try {
+      await updateDoc(doc(db, 'users', id), { ...data, updatedAt: serverTimestamp() });
+      return { success: true };
+    } catch(e) { return { success: false, error: e.message }; }
+  };
+
+  // ── ADMIN: Delete user ─────────────────────────────────
+  window.__spcDeleteUser = async function(id) {
+    try {
+      await deleteDoc(doc(db, 'users', id));
+      return { success: true };
+    } catch(e) { return { success: false, error: e.message }; }
+  };
+
+  // ── ADMIN: List all licenses ───────────────────────────
+  window.__spcListLicenses = async function() {
+    try {
+      const snap = await getDocs(collection(db, 'licenses'));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch(e) { return []; }
+  };
+
+  // ── ADMIN: Create license ──────────────────────────────
+  window.__spcCreateLicense = async function(licData) {
+    try {
+      const key = licData.key || ('SPC-' + Array.from({length:3},()=>Math.random().toString(36).substr(2,4).toUpperCase()).join('-'));
+      await setDoc(doc(db, 'licenses', key), {
+        ...licData,
+        key,
+        isActive: true,
+        activationCount: 0,
+        createdAt: serverTimestamp()
+      });
+      return { success: true, key };
+    } catch(e) { return { success: false, error: e.message }; }
+  };
+
+  // ── ADMIN: Update license ──────────────────────────────
+  window.__spcUpdateLicense = async function(id, data) {
+    try {
+      await updateDoc(doc(db, 'licenses', id), { ...data, updatedAt: serverTimestamp() });
+      return { success: true };
+    } catch(e) { return { success: false, error: e.message }; }
+  };
+
+  window.__spcValidate = validateLicense;
+  window.__spcFirebaseReady = true;
+  document.dispatchEvent(new Event('firebase-ready'));
+</script>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPC Analysis — X̄ & R Chart Suite</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════════════════════
+   THEMES  — each [data-theme] block overrides :root
+   ══════════════════════════════════════════════════════ */
+
+/* DEFAULT: Midnight Graphite (dark) */
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2128;
+  --surface3: #21262d;
+  --border: #30363d;
+  --border2: #484f58;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --text3: #6e7681;
+  --accent: #f0883e;
+  --accent2: #3fb950;
+  --accent3: #58a6ff;
+  --red: #f85149;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+  --ucl-color: #f85149;
+  --cl-color: #3fb950;
+  --lcl-color: #58a6ff;
+  --xbar-color: #f0883e;
+  --r-color: #bc8cff;
+  --header-h: 56px;
+  --topbar-bg: rgba(13,17,23,0.92);
+  --sidebar-accent-bar: var(--accent);
+  --tab-active-color: var(--accent);
+  --kpi-border-left: none;
+}
+
+/* THEME: Ocean Teal */
+[data-theme="ocean"] {
+  --bg: #071a2e;
+  --surface: #0a2540;
+  --surface2: #0d2f4f;
+  --surface3: #103860;
+  --border: #1a4a70;
+  --border2: #2a6090;
+  --text: #d0eeff;
+  --text2: #7ab8d8;
+  --text3: #4a88a8;
+  --accent: #00d4ff;
+  --accent2: #00e5a0;
+  --accent3: #ffb347;
+  --red: #ff6b8a;
+  --yellow: #ffd166;
+  --purple: #c77dff;
+  --ucl-color: #ff6b8a;
+  --cl-color: #00e5a0;
+  --lcl-color: #00d4ff;
+  --xbar-color: #ffb347;
+  --r-color: #c77dff;
+  --topbar-bg: rgba(7,26,46,0.94);
+}
+
+/* THEME: Sunset Coral (light warm) */
+[data-theme="sunset"] {
+  --bg: #fff8f3;
+  --surface: #ffffff;
+  --surface2: #fef3ea;
+  --surface3: #fde8d5;
+  --border: #f0d5bf;
+  --border2: #e0b898;
+  --text: #2d1a0a;
+  --text2: #7a4a28;
+  --text3: #b07040;
+  --accent: #e8520a;
+  --accent2: #2d9e4f;
+  --accent3: #1a6fc4;
+  --red: #d62828;
+  --yellow: #c87800;
+  --purple: #7a3ec4;
+  --ucl-color: #d62828;
+  --cl-color: #2d9e4f;
+  --lcl-color: #1a6fc4;
+  --xbar-color: #e8520a;
+  --r-color: #7a3ec4;
+  --topbar-bg: rgba(255,248,243,0.95);
+}
+
+/* THEME: Forest Emerald */
+[data-theme="forest"] {
+  --bg: #061a0e;
+  --surface: #0a2614;
+  --surface2: #0e301a;
+  --surface3: #123c20;
+  --border: #1a5a2a;
+  --border2: #2a7a40;
+  --text: #d0ffe0;
+  --text2: #70c890;
+  --text3: #408060;
+  --accent: #00ff88;
+  --accent2: #ffdd00;
+  --accent3: #00ccff;
+  --red: #ff5566;
+  --yellow: #ffcc00;
+  --purple: #dd88ff;
+  --ucl-color: #ff5566;
+  --cl-color: #00ff88;
+  --lcl-color: #00ccff;
+  --xbar-color: #ffdd00;
+  --r-color: #dd88ff;
+  --topbar-bg: rgba(6,26,14,0.95);
+}
+
+/* THEME: Lavender Frost (light cool) */
+[data-theme="lavender"] {
+  --bg: #f4f2fc;
+  --surface: #ffffff;
+  --surface2: #ede9fa;
+  --surface3: #e2dcf5;
+  --border: #cfc8ee;
+  --border2: #b0a4e0;
+  --text: #1a1230;
+  --text2: #5a4890;
+  --text3: #8a78c0;
+  --accent: #6c3fc4;
+  --accent2: #28a860;
+  --accent3: #e85090;
+  --red: #d42040;
+  --yellow: #c08000;
+  --purple: #6c3fc4;
+  --ucl-color: #d42040;
+  --cl-color: #28a860;
+  --lcl-color: #6c3fc4;
+  --xbar-color: #e85090;
+  --r-color: #c08000;
+  --topbar-bg: rgba(244,242,252,0.95);
+}
+
+/* THEME: Industrial Steel */
+[data-theme="steel"] {
+  --bg: #12141a;
+  --surface: #1a1e28;
+  --surface2: #222836;
+  --surface3: #2a3244;
+  --border: #38445a;
+  --border2: #506080;
+  --text: #e8ecf5;
+  --text2: #8898b8;
+  --text3: #5870a0;
+  --accent: #4db8ff;
+  --accent2: #44dd88;
+  --accent3: #ffaa22;
+  --red: #ff4455;
+  --yellow: #ffcc22;
+  --purple: #aa88ff;
+  --ucl-color: #ff4455;
+  --cl-color: #44dd88;
+  --lcl-color: #4db8ff;
+  --xbar-color: #ffaa22;
+  --r-color: #aa88ff;
+  --topbar-bg: rgba(18,20,26,0.94);
+}
+
+/* ── THEME SWITCHER UI ── */
+.theme-switcher {
+  position: relative;
+}
+.theme-toggle-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.theme-toggle-btn:hover { background: var(--surface3); }
+.theme-swatches {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  padding: 12px;
+  z-index: 200;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  width: 220px;
+}
+.theme-swatches.open { display: block; }
+.theme-swatches-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text3);
+  margin-bottom: 10px;
+}
+.swatch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.swatch-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 8px 4px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background: var(--surface2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.swatch-btn:hover { border-color: var(--border2); }
+.swatch-btn.active { border-color: var(--accent); }
+.swatch-circles { display: flex; gap: 2px; }
+.swatch-dot { width: 10px; height: 10px; border-radius: 50%; }
+.swatch-label { font-size: 9px; color: var(--text3); text-align: center; line-height: 1.2; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 13px;
+}
+
+/* ── TOPBAR ── */
+.topbar {
+  position: sticky; top: 0; z-index: 100;
+  height: var(--header-h);
+  background: var(--topbar-bg);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px;
+}
+.topbar-brand { display: flex; align-items: center; gap: 10px; }
+.brand-badge {
+  background: var(--accent);
+  color: #0d1117;
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  padding: 3px 8px;
+  border-radius: 3px;
+}
+.brand-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.3px;
+}
+.brand-sub { font-size: 11px; color: var(--text3); letter-spacing: 1px; text-transform: uppercase; }
+
+.topbar-actions { display: flex; gap: 8px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  color: var(--text);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--surface3); border-color: var(--text3); }
+.btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+.btn-primary:hover { background: #ffaa5e; border-color: #ffaa5e; }
+.btn-green { background: var(--accent2); color: #0d1117; border-color: var(--accent2); font-weight: 600; }
+.btn-green:hover { opacity: 0.85; }
+.btn-danger { background: transparent; color: var(--red); border-color: var(--red); }
+.btn-danger:hover { background: rgba(248,81,73,0.1); }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+
+/* ── LAYOUT ── */
+.app-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  height: calc(100vh - var(--header-h));
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-section {
+  border-bottom: 1px solid var(--border);
+  padding: 16px;
+}
+.sidebar-section-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text3);
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 6px;
+}
+.sidebar-section-title::before {
+  content: '';
+  display: block; width: 3px; height: 12px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.form-group { margin-bottom: 10px; }
+.form-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.form-input {
+  width: 100%;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  transition: border-color 0.15s;
+}
+.form-input:focus { outline: none; border-color: var(--accent3); }
+.form-input::placeholder { color: var(--text3); }
+
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* ── TABS (MAIN) ── */
+.main-content {
+  overflow-y: auto;
+  background: var(--bg);
+}
+.tab-bar {
+  display: flex;
+  gap: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  position: sticky; top: 0; z-index: 50;
+}
+.tab-btn {
+  padding: 12px 18px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text2);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; padding: 20px; }
+.tab-panel.active { display: block; }
+
+/* ── DATA INPUT ── */
+.data-controls {
+  display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;
+}
+.data-textarea {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  padding: 12px;
+  border-radius: 8px;
+  resize: vertical;
+  min-height: 200px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+.data-textarea:focus { outline: none; border-color: var(--accent3); }
+.upload-zone {
+  border: 2px dashed var(--border2);
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-bottom: 10px;
+}
+.upload-zone:hover, .upload-zone.drag-over { border-color: var(--accent); background: rgba(240,136,62,0.05); }
+.upload-zone svg { margin-bottom: 8px; }
+.upload-zone p { font-size: 12px; color: var(--text2); }
+.upload-zone strong { color: var(--accent); }
+input[type=file] { display: none; }
+
+/* ── CHART AREA ── */
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.chart-card-full {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+.chart-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+}
+.chart-subtitle { font-size: 11px; color: var(--text3); margin-top: 1px; }
+.chart-legend {
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+.legend-item {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text2);
+}
+.legend-dot { width: 10px; height: 3px; border-radius: 2px; }
+canvas { max-width: 100%; }
+
+/* ── VIOLATION BADGES ── */
+.violations-list {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+}
+.vio-badge {
+  background: rgba(248,81,73,0.12);
+  border: 1px solid rgba(248,81,73,0.3);
+  color: var(--red);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-family: 'DM Mono', monospace;
+}
+.vio-badge-warn {
+  background: rgba(210,153,34,0.12);
+  border: 1px solid rgba(210,153,34,0.3);
+  color: var(--yellow);
+}
+
+/* ── SUMMARY TABLE ── */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+}
+.kpi-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.kpi-value {
+  font-family: 'DM Mono', monospace;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text);
+}
+.kpi-value.green { color: var(--accent2); }
+.kpi-value.red { color: var(--red); }
+.kpi-value.yellow { color: var(--yellow); }
+.kpi-sub { font-size: 10px; color: var(--text3); margin-top: 2px; }
+
+.data-table-wrap { overflow-x: auto; }
+table.spc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+}
+table.spc-table th {
+  background: var(--surface2);
+  color: var(--text2);
+  padding: 7px 10px;
+  text-align: center;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+  white-space: nowrap;
+}
+table.spc-table td {
+  padding: 5px 10px;
+  text-align: center;
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+table.spc-table tr:hover td { background: var(--surface2); }
+table.spc-table td.oor { color: var(--red); font-weight: 600; }
+table.spc-table td.warn { color: var(--yellow); font-weight: 600; }
+table.spc-table td.ok { color: var(--accent2); }
+table.spc-table td.sg-num { color: var(--text3); font-size: 10px; }
+
+/* ── CAPABILITY ── */
+.cap-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.cap-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.cap-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cap-row:last-child { border-bottom: none; }
+.cap-name { color: var(--text2); font-size: 12px; }
+.cap-val {
+  font-family: 'DM Mono', monospace;
+  font-size: 14px;
+  font-weight: 500;
+}
+.gauge-bar {
+  height: 6px;
+  background: var(--surface3);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.gauge-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+/* ── RULES PANEL ── */
+.rules-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.rule-item {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex; gap: 8px; align-items: flex-start;
+}
+.rule-icon {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700;
+  flex-shrink: 0;
+}
+.rule-icon.pass { background: rgba(63,185,80,0.2); color: var(--accent2); }
+.rule-icon.fail { background: rgba(248,81,73,0.2); color: var(--red); }
+.rule-name { font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+.rule-desc { font-size: 10px; color: var(--text3); line-height: 1.4; }
+
+/* ── EMPTY STATE ── */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 60px 20px; text-align: center; color: var(--text3);
+}
+.empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; }
+.empty-title { font-family: 'Syne', sans-serif; font-size: 18px; color: var(--text2); margin-bottom: 8px; }
+
+/* ── NOTIFICATION ── */
+.notif {
+  position: fixed; bottom: 20px; right: 20px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 12px;
+  z-index: 9999;
+  transition: all 0.3s;
+  max-width: 320px;
+}
+.notif.success { border-left: 3px solid var(--accent2); }
+.notif.error { border-left: 3px solid var(--red); }
+.notif.hide { opacity: 0; transform: translateY(10px); pointer-events: none; }
+
+/* ── PRINT ── */
+@media print {
+  .topbar, .sidebar, .tab-bar, .topbar-actions, .data-controls,
+  .upload-zone, .btn, #tab-data { display: none !important; }
+  .app-layout { display: block; }
+  .main-content { overflow: visible; height: auto; }
+  .tab-panel { display: block !important; padding: 0; }
+  body { background: white; color: black; font-size: 10px; }
+  .chart-card, .chart-card-full, .kpi-card, .cap-card {
+    background: white; border: 1px solid #ccc; break-inside: avoid;
+  }
+  .chart-grid { grid-template-columns: 1fr 1fr; }
+  .summary-grid { grid-template-columns: repeat(4,1fr); }
+  canvas { max-height: 200px; }
+  @page { size: A3 landscape; margin: 10mm; }
+  .print-header {
+    display: flex !important;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid #333;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }
+}
+.print-header { display: none; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+.section-label {
+  font-family: 'Syne', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text3);
+  margin-bottom: 10px;
+  margin-top: 20px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ── LICENSE GATE ── */
+#license-gate {
+  position:fixed;inset:0;z-index:9999;
+  background:radial-gradient(ellipse at 30% 20%, #0d1a2e 0%, #070b12 70%);
+  display:flex;align-items:center;justify-content:center;
+}
+.gate-card {
+  background:rgba(22,27,34,0.97);
+  border:1px solid rgba(88,166,255,0.2);
+  border-radius:20px;padding:48px 52px;width:460px;max-width:96vw;
+  box-shadow:0 32px 80px rgba(0,0,0,.75), 0 0 0 1px rgba(88,166,255,.08);
+  position:relative;overflow:hidden;
+}
+.gate-card::before {
+  content:'';position:absolute;top:-60px;right:-60px;
+  width:200px;height:200px;
+  background:radial-gradient(circle,rgba(88,166,255,.12) 0%,transparent 70%);
+  border-radius:50%;pointer-events:none;
+}
+.gate-logo { display:flex;align-items:center;gap:12px;margin-bottom:32px; }
+.gate-logo-badge {
+  width:48px;height:48px;border-radius:12px;
+  background:linear-gradient(135deg,var(--accent),var(--accent3));
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#0d1117;
+}
+.gate-logo-text h1 { font-family:'Syne',sans-serif;font-size:20px;font-weight:700;color:#e6edf3;line-height:1; }
+.gate-logo-text p  { font-size:10px;color:var(--text3);letter-spacing:2px;text-transform:uppercase;margin-top:3px; }
+.gate-label { font-size:13px;font-weight:600;color:var(--text2);margin-bottom:4px; }
+.gate-sub   { font-size:11px;color:var(--text3);margin-bottom:24px;line-height:1.6; }
+.gate-hint  { font-size:11px;color:var(--text3);margin-bottom:18px;display:flex;align-items:center;gap:6px; }
+.gate-hint code { background:rgba(88,166,255,.1);color:var(--accent3);padding:2px 7px;border-radius:4px;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px; }
+.gate-input-wrap { position:relative;margin-bottom:12px; }
+.gate-input {
+  width:100%;padding:14px 48px 14px 16px;
+  background:rgba(28,33,40,.9);border:1.5px solid var(--border);color:var(--text);
+  border-radius:10px;font-family:'DM Mono',monospace;font-size:15px;
+  letter-spacing:2px;text-transform:uppercase;transition:border-color .2s,box-shadow .2s;
+}
+.gate-input:focus { outline:none;border-color:var(--accent3);box-shadow:0 0 0 3px rgba(88,166,255,.15); }
+.gate-input::placeholder { color:var(--border2);font-size:12px;letter-spacing:1px;text-transform:none; }
+.gate-icon { position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:16px;color:var(--border2); }
+.gate-btn {
+  width:100%;padding:14px;border:none;border-radius:10px;
+  background:linear-gradient(135deg,var(--accent),var(--accent3));
+  color:#0d1117;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;
+  cursor:pointer;transition:all .2s;letter-spacing:.5px;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+}
+.gate-btn:hover { transform:translateY(-1px);box-shadow:0 8px 24px rgba(88,166,255,.3); }
+.gate-btn:disabled { opacity:.5;cursor:not-allowed;transform:none; }
+.gate-btn.loading .btn-lbl { display:none; }
+.gate-spinner { width:18px;height:18px;border:2px solid rgba(0,0,0,.3);border-top-color:#0d1117;border-radius:50%;animation:gspin .7s linear infinite;display:none; }
+.gate-btn.loading .gate-spinner { display:block; }
+@keyframes gspin { to { transform:rotate(360deg); } }
+.gate-error { margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.25);color:#fca5a5;font-size:12px;display:none;align-items:center;gap:8px; }
+.gate-error.show { display:flex; }
+.gate-footer { margin-top:20px;text-align:center;font-size:10px;color:var(--border2);line-height:1.8; }
+.gate-footer strong { color:var(--text3); }
+
+/* ── READ-ONLY BANNER ── */
+#ro-banner {
+  display:none;position:fixed;top:0;left:0;right:0;z-index:800;
+  background:linear-gradient(90deg,#92400e,#b45309);color:#fef3c7;
+  padding:8px 20px;font-size:12px;font-weight:600;
+  flex-align:center;justify-content:space-between;align-items:center;
+}
+#ro-banner.visible { display:flex; }
+.ro-left { display:flex;align-items:center;gap:8px; }
+.ro-actions { display:flex;gap:8px; }
+.ro-btn { padding:4px 14px;border-radius:5px;border:1px solid rgba(254,243,199,.3);background:rgba(254,243,199,.1);color:#fef3c7;font-size:11px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s; }
+.ro-btn:hover { background:rgba(254,243,199,.2); }
+body.has-ro-banner .topbar { top:36px; }
+body.has-ro-banner .app-layout { height:calc(100vh - var(--header-h) - 36px); }
+
+/* ── LICENSE CHIP ── */
+#lic-chip {
+  display:none;align-items:center;gap:6px;
+  background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.25);
+  border-radius:20px;padding:3px 12px;font-size:11px;color:#3fb950;cursor:pointer;
+}
+#lic-chip.visible { display:flex; }
+.lic-dot { width:6px;height:6px;border-radius:50%;background:#3fb950;animation:lpulse 2s infinite; }
+@keyframes lpulse { 0%,100%{opacity:1}50%{opacity:.3} }
+
+/* ── LICENSE INFO MODAL ── */
+#lic-modal {
+  display:none;position:fixed;inset:0;z-index:2000;
+  background:rgba(0,0,0,.6);align-items:center;justify-content:center;
+}
+#lic-modal.open { display:flex; }
+.lic-modal-card {
+  background:var(--surface);border:1px solid var(--border2);border-radius:16px;
+  padding:28px;width:420px;max-width:95vw;
+  box-shadow:0 24px 60px rgba(0,0,0,.5);
+}
+.lic-modal-title { font-family:'Syne',sans-serif;font-size:15px;font-weight:700;margin-bottom:18px;display:flex;align-items:center;gap:8px; }
+.lic-row { display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px dotted var(--border);font-size:12px; }
+.lic-row:last-child { border-bottom:none; }
+.lic-row-label { color:var(--text2); }
+.lic-row-val { font-family:'DM Mono',monospace;font-weight:600;color:var(--text); }
+
+
+/* ── ADMIN PANEL ──────────────────────────────────────────── */
+.admin-overlay {
+  position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,0.75);
+  display:none;align-items:center;justify-content:center;
+}
+.admin-overlay.open { display:flex; }
+.admin-modal {
+  background:var(--surface);border:1px solid var(--border2);border-radius:16px;
+  width:900px;max-width:97vw;max-height:92vh;display:flex;flex-direction:column;
+  box-shadow:0 32px 80px rgba(0,0,0,.7);
+}
+.admin-header {
+  display:flex;align-items:center;justify-content:space-between;
+  padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.admin-header h2 {
+  font-family:'Syne',sans-serif;font-size:16px;font-weight:700;
+  display:flex;align-items:center;gap:10px;
+}
+.admin-tab-bar {
+  display:flex;background:var(--surface2);border-bottom:1px solid var(--border);
+  padding:0 24px;flex-shrink:0;
+}
+.admin-tab-btn {
+  padding:10px 18px;background:transparent;border:none;
+  border-bottom:2px solid transparent;color:var(--text2);
+  font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;
+  cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+.admin-tab-btn:hover { color:var(--text); }
+.admin-tab-btn.active { color:var(--accent);border-bottom-color:var(--accent); }
+.admin-body { overflow-y:auto;padding:20px 24px;flex:1; }
+.admin-section { display:none; }
+.admin-section.active { display:block; }
+.admin-form-grid {
+  display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;
+}
+.admin-fg { display:flex;flex-direction:column;gap:4px; }
+.admin-label {
+  font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;
+  color:var(--text2);
+}
+.admin-input {
+  background:var(--surface3);border:1px solid var(--border);color:var(--text);
+  padding:7px 10px;border-radius:6px;font-family:'DM Sans',sans-serif;
+  font-size:12px;transition:border-color .15s;width:100%;
+}
+.admin-input:focus { outline:none;border-color:var(--accent3); }
+.admin-input::placeholder { color:var(--text3); }
+.admin-divider {
+  font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;
+  color:var(--text3);margin:18px 0 12px;display:flex;align-items:center;gap:8px;
+}
+.admin-divider::after { content:'';flex:1;height:1px;background:var(--border); }
+.user-card {
+  background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+  padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;
+  justify-content:space-between;gap:10px;
+}
+.user-card-info { flex:1;min-width:0; }
+.user-card-name { font-size:13px;font-weight:600;color:var(--text);margin-bottom:2px; }
+.user-card-meta { font-size:11px;color:var(--text3);margin-top:1px; }
+.user-card-actions { display:flex;gap:6px;flex-shrink:0; }
+.u-badge {
+  display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;
+  font-size:10px;font-weight:600;margin-left:6px;
+}
+.badge-admin  { background:rgba(188,140,255,.15);color:var(--purple);border:1px solid rgba(188,140,255,.3); }
+.badge-active { background:rgba(63,185,80,.15);color:var(--accent2);border:1px solid rgba(63,185,80,.3); }
+.badge-inactive { background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.25); }
+.lic-card {
+  background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+  padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;
+}
+.lic-card-key {
+  font-family:'DM Mono',monospace;font-size:12px;font-weight:600;
+  color:var(--accent3);letter-spacing:1px;
+}
+.lic-card-meta { font-size:10px;color:var(--text3);margin-top:3px; }
+.lic-card-actions { display:flex;gap:6px;flex-shrink:0;margin-left:auto; }
+.gen-key-display {
+  flex:1;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;
+  color:var(--accent3);background:var(--surface3);border:1px solid var(--border);
+  border-radius:6px;padding:8px 12px;letter-spacing:2px;
+}
+</style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<!-- ═══════════════ LICENSE GATE ═══════════════ -->
+<div id="license-gate">
+  <div class="gate-card">
+    <div class="gate-logo">
+      <div class="gate-logo-badge">SPC</div>
+      <div class="gate-logo-text">
+        <h1>SPC Analysis Suite</h1>
+        <p>X̄ &amp; R Chart — Statistical Process Control</p>
+      </div>
+    </div>
+    <div class="gate-label">Enter License Key to continue</div>
+    <div class="gate-sub">Your license key was provided by your software administrator.<br>Contact support if you do not have one.</div>
+    <div class="gate-hint">Format: <code>SPC-XXXX-XXXX-XXXX</code></div>
+    <div class="gate-input-wrap">
+      <input class="gate-input" id="lic-key-input" type="text" maxlength="19"
+        placeholder="SPC-XXXX-XXXX-XXXX"
+        oninput="fmtGateKey(this)" onkeydown="if(event.key==='Enter')doActivate()">
+      <span class="gate-icon">🔑</span>
+    </div>
+    <div class="gate-error" id="gate-err">
+      <span>⚠</span><span id="gate-err-msg">Invalid license key.</span>
+    </div>
+    <button class="gate-btn" id="gate-btn" onclick="doActivate()" style="margin-top:14px">
+      <div class="gate-spinner"></div>
+      <span class="btn-lbl">🔓 Activate License</span>
+    </button>
+    <div class="gate-footer">
+      <strong>Offline use is not supported.</strong><br>
+      An active internet connection is required to validate your license.<br>
+      License is verified against our secure server on every session.
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ READ-ONLY BANNER ═══════════════ -->
+<div id="ro-banner">
+  <div class="ro-left">
+    <span>⚠</span>
+    <span>READ-ONLY MODE — License expired on <strong id="ro-expiry">—</strong>. Analysis disabled. Contact your administrator to renew.</span>
+  </div>
+  <div class="ro-actions">
+    <button class="ro-btn" onclick="openLicModal()">License Info</button>
+    <button class="ro-btn" onclick="licLogout()">🔓 Change Key</button>
+  </div>
+</div>
+
+<!-- ═══════════════ LICENSE INFO MODAL ═══════════════ -->
+<div id="lic-modal">
+  <div class="lic-modal-card">
+    <div class="lic-modal-title">🔑 License Information</div>
+    <div id="lic-modal-body"></div>
+    <button class="btn btn-green" style="margin-top:18px;width:100%" onclick="document.getElementById('lic-modal').classList.remove('open')">Close</button>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="topbar-brand">
+    <span class="brand-badge">SPC</span>
+    <div>
+      <div class="brand-title">Statistical Process Control</div>
+      <div class="brand-sub">X̄ &amp; R Chart Analysis Suite</div>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;justify-content:center;align-items:center">
+    <div id="lic-chip" onclick="openLicModal()">
+      <span class="lic-dot"></span>
+      <span id="chip-co">Licensed</span>
+      <span style="color:var(--text3);font-size:10px">·</span>
+      <span id="chip-exp" style="font-size:10px;color:var(--text3)"></span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <div class="theme-switcher">
+      <button class="theme-toggle-btn" onclick="toggleThemePanel()" id="theme-toggle-btn">
+        <span id="theme-current-dots" style="display:flex;gap:3px;">
+          <span style="width:8px;height:8px;border-radius:50%;background:#f0883e;display:inline-block;"></span>
+          <span style="width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;"></span>
+          <span style="width:8px;height:8px;border-radius:50%;background:#58a6ff;display:inline-block;"></span>
+        </span>
+        Theme
+      </button>
+      <div class="theme-swatches" id="theme-swatches">
+        <div class="theme-swatches-title">Choose Theme</div>
+        <div class="swatch-grid">
+          <button class="swatch-btn active" data-theme="" onclick="applyTheme('',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#f0883e"></div>
+              <div class="swatch-dot" style="background:#3fb950"></div>
+              <div class="swatch-dot" style="background:#58a6ff"></div>
+            </div>
+            <div class="swatch-label">Midnight Graphite</div>
+          </button>
+          <button class="swatch-btn" data-theme="ocean" onclick="applyTheme('ocean',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#00d4ff"></div>
+              <div class="swatch-dot" style="background:#00e5a0"></div>
+              <div class="swatch-dot" style="background:#ffb347"></div>
+            </div>
+            <div class="swatch-label">Ocean Teal</div>
+          </button>
+          <button class="swatch-btn" data-theme="sunset" onclick="applyTheme('sunset',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#e8520a"></div>
+              <div class="swatch-dot" style="background:#2d9e4f"></div>
+              <div class="swatch-dot" style="background:#1a6fc4"></div>
+            </div>
+            <div class="swatch-label">Sunset Coral</div>
+          </button>
+          <button class="swatch-btn" data-theme="forest" onclick="applyTheme('forest',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#00ff88"></div>
+              <div class="swatch-dot" style="background:#ffdd00"></div>
+              <div class="swatch-dot" style="background:#00ccff"></div>
+            </div>
+            <div class="swatch-label">Forest Emerald</div>
+          </button>
+          <button class="swatch-btn" data-theme="lavender" onclick="applyTheme('lavender',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#6c3fc4"></div>
+              <div class="swatch-dot" style="background:#28a860"></div>
+              <div class="swatch-dot" style="background:#e85090"></div>
+            </div>
+            <div class="swatch-label">Lavender Frost</div>
+          </button>
+          <button class="swatch-btn" data-theme="steel" onclick="applyTheme('steel',this)">
+            <div class="swatch-circles">
+              <div class="swatch-dot" style="background:#4db8ff"></div>
+              <div class="swatch-dot" style="background:#44dd88"></div>
+              <div class="swatch-dot" style="background:#ffaa22"></div>
+            </div>
+            <div class="swatch-label">Industrial Steel</div>
+          </button>
+        </div>
+      </div>
+    </div>
+    <button class="btn" onclick="loadDemo()">⚡ Demo Data</button>
+    <button class="btn btn-danger" onclick="clearAll()">✕ Clear</button>
+    <button class="btn btn-green" onclick="runAnalysis()">▶ Analyse</button>
+    <button class="btn btn-primary" onclick="window.print()">⎙ Print</button>
+    <button class="btn btn-sm" id="btn-admin" onclick="openAdminPanel()" style="display:none;background:linear-gradient(135deg,var(--purple),var(--accent3));color:#fff;border-color:var(--purple);font-weight:600;">🛡 Admin</button>
+    <button class="btn btn-sm" onclick="licLogout()" title="Change license key" style="padding:4px 8px">🔓</button>
+  </div>
+</header>
+
+<div class="app-layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Company Details</div>
+      <div class="form-group">
+        <label class="form-label">Company Name</label>
+        <input class="form-input" id="f-company" placeholder="e.g. Polyplastics Industries">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Customer Name</label>
+        <input class="form-input" id="f-customer" placeholder="e.g. ABC Auto Parts Ltd.">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Report Date</label>
+        <input class="form-input" id="f-date" type="date">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Prepared By</label>
+        <input class="form-input" id="f-prepby" placeholder="Engineer name">
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Part &amp; Process</div>
+      <div class="form-group">
+        <label class="form-label">Part Name</label>
+        <input class="form-input" id="f-partname" placeholder="e.g. Bearing Housing Cover">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Part Number</label>
+        <input class="form-input" id="f-partno" placeholder="e.g. BHC-391-A">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Characteristic</label>
+        <input class="form-input" id="f-char" placeholder="e.g. OD Diameter (mm)">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Machine / Process</label>
+        <input class="form-input" id="f-machine" placeholder="e.g. CNC Lathe MCL-12">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Instrument</label>
+        <input class="form-input" id="f-instr" placeholder="e.g. Vernier Caliper 0.01mm">
+      </div>
+      <div class="form-group">
+        <label class="form-label">SPC Number</label>
+        <input class="form-input" id="f-spcno" placeholder="e.g. SPC-2024-001">
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Specification Limits</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Nominal (Target)</label>
+          <input class="form-input" id="f-nominal" type="number" step="any" placeholder="391.40">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Tolerance ±</label>
+          <input class="form-input" id="f-tol" type="number" step="any" placeholder="2.00">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">USL</label>
+          <input class="form-input" id="f-usl" type="number" step="any" placeholder="393.40">
+        </div>
+        <div class="form-group">
+          <label class="form-label">LSL</label>
+          <input class="form-input" id="f-lsl" type="number" step="any" placeholder="389.40">
+        </div>
+      </div>
+      <small style="color:var(--text3);font-size:10px;">Enter USL/LSL directly OR Nominal + Tolerance.</small>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Control Rules</div>
+      <div id="rules-toggles" style="display:grid;gap:6px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule1" checked> Rule 1: Point beyond ±3σ
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule2" checked> Rule 2: 9 pts same side of CL
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule3" checked> Rule 3: 6 pts trend up/down
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule4" checked> Rule 4: 14 pts alternating
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule5"> Rule 5: 2 of 3 beyond ±2σ
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="rule6"> Rule 6: 4 of 5 beyond ±1σ
+        </label>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main-content">
+
+    <!-- Print header (visible only on print) -->
+    <div class="print-header" id="print-header">
+      <div>
+        <div style="font-size:18px;font-weight:700;" id="ph-company">—</div>
+        <div style="font-size:12px;color:#555;" id="ph-sub">SPC Analysis Report</div>
+      </div>
+      <div style="text-align:right;font-size:11px;color:#555;" id="ph-meta">—</div>
+    </div>
+
+    <!-- TABS -->
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('data',this)">📋 Data Input</button>
+      <button class="tab-btn" onclick="switchTab('charts',this)">📈 Charts</button>
+      <button class="tab-btn" onclick="switchTab('summary',this)">📊 Summary Table</button>
+      <button class="tab-btn" onclick="switchTab('capability',this)">⚙️ Capability</button>
+      <button class="tab-btn" onclick="switchTab('rules',this)">🔍 Rule Violations</button>
+    </div>
+
+    <!-- TAB: DATA INPUT -->
+    <div id="tab-data" class="tab-panel active">
+      <div class="data-controls">
+        <button class="btn btn-sm" onclick="loadDemo()">⚡ Insert Demo Data</button>
+        <button class="btn btn-sm" onclick="formatData()">⚙ Format</button>
+        <button class="btn btn-sm btn-danger" onclick="clearDataOnly()">✕ Clear Data</button>
+        <span style="color:var(--text3);font-size:11px;">Rows = subgroups, Columns = observations (tab/space/comma separated)</span>
+      </div>
+
+      <!-- Upload zone -->
+      <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleDrop(event)">
+        <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="color:var(--accent);opacity:0.7">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <p><strong>Click to upload</strong> or drag &amp; drop a CSV / TXT file</p>
+        <p style="margin-top:4px;font-size:10px;">Each row = 1 subgroup, values separated by commas or tabs</p>
+        <input type="file" id="file-input" accept=".csv,.txt,.tsv" onchange="handleFileUpload(event)">
+      </div>
+
+      <textarea class="data-textarea" id="data-input" placeholder="Paste data here — one subgroup per row, 5 values per row separated by tab, space, or comma.
+
+Example (25 rows × 5 columns):
+391.03	390.95	391.12	391.07	390.88
+391.20	391.08	391.15	390.98	391.22
+..."></textarea>
+
+      <div style="margin-top:10px;display:flex;gap:8px;">
+        <button class="btn btn-green" onclick="runAnalysis()">▶ Run SPC Analysis</button>
+        <span id="data-status" style="font-size:11px;color:var(--text3);align-self:center;"></span>
+      </div>
+    </div>
+
+    <!-- TAB: CHARTS -->
+    <div id="tab-charts" class="tab-panel">
+      <div id="charts-empty" class="empty-state">
+        <div class="empty-icon">📉</div>
+        <div class="empty-title">No Data Yet</div>
+        <p>Go to <strong>Data Input</strong> tab, paste or upload your data, then click <strong>Run Analysis</strong>.</p>
+        <button class="btn btn-primary" style="margin-top:16px;" onclick="loadDemo();runAnalysis();switchTab('charts',document.querySelectorAll('.tab-btn')[1])">⚡ Load Demo &amp; Analyse</button>
+      </div>
+      <div id="charts-content" style="display:none;">
+        <div class="chart-grid">
+          <div class="chart-card">
+            <div class="chart-header">
+              <div>
+                <div class="chart-title">X̄ Chart — Subgroup Means</div>
+                <div class="chart-subtitle" id="xbar-subtitle">—</div>
+              </div>
+              <div class="chart-legend">
+                <div class="legend-item"><div class="legend-dot" style="background:var(--ucl-color)"></div>UCL/LCL</div>
+                <div class="legend-item"><div class="legend-dot" style="background:var(--cl-color)"></div>CL (X̿)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:var(--xbar-color)"></div>X̄</div>
+              </div>
+            </div>
+            <canvas id="xbarChart" height="180"></canvas>
+            <div class="violations-list" id="xbar-violations"></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-header">
+              <div>
+                <div class="chart-title">R Chart — Subgroup Range</div>
+                <div class="chart-subtitle" id="r-subtitle">—</div>
+              </div>
+              <div class="chart-legend">
+                <div class="legend-item"><div class="legend-dot" style="background:var(--ucl-color)"></div>UCL(R)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:var(--cl-color)"></div>R̄</div>
+                <div class="legend-item"><div class="legend-dot" style="background:var(--r-color)"></div>R</div>
+              </div>
+            </div>
+            <canvas id="rChart" height="180"></canvas>
+            <div class="violations-list" id="r-violations"></div>
+          </div>
+        </div>
+        <div class="chart-card-full">
+          <div class="chart-header">
+            <div>
+              <div class="chart-title">Histogram — All Observations</div>
+              <div class="chart-subtitle" id="hist-subtitle">Normal distribution overlay</div>
+            </div>
+            <div class="chart-legend">
+              <div class="legend-item"><div class="legend-dot" style="background:var(--accent3)"></div>Frequency</div>
+              <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Normal Curve</div>
+              <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>USL/LSL</div>
+            </div>
+          </div>
+          <canvas id="histChart" height="120"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: SUMMARY TABLE -->
+    <div id="tab-summary" class="tab-panel">
+      <div id="summary-empty" class="empty-state">
+        <div class="empty-icon">📋</div>
+        <div class="empty-title">No Analysis Run</div>
+      </div>
+      <div id="summary-content" style="display:none;">
+        <div class="summary-grid" id="kpi-grid"></div>
+        <div class="section-label">Subgroup Summary</div>
+        <div class="data-table-wrap">
+          <table class="spc-table" id="spc-table"></table>
+        </div>
+        <div class="section-label" style="margin-top:16px;">Control Limit Summary</div>
+        <div id="cl-summary-table"></div>
+      </div>
+    </div>
+
+    <!-- TAB: CAPABILITY -->
+    <div id="tab-capability" class="tab-panel">
+      <div id="cap-empty" class="empty-state">
+        <div class="empty-icon">⚙️</div>
+        <div class="empty-title">Enter Specification Limits</div>
+        <p>Set USL and LSL (or Nominal ± Tolerance) in the sidebar, then run analysis.</p>
+      </div>
+      <div id="cap-content" style="display:none;">
+        <div class="summary-grid" id="cap-kpi"></div>
+        <div class="cap-grid" id="cap-details"></div>
+        <div class="chart-card-full" style="margin-top:16px;">
+          <div class="chart-title" style="margin-bottom:12px;">Process Distribution vs. Specification</div>
+          <canvas id="capChart" height="120"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: RULES -->
+    <div id="tab-rules" class="tab-panel">
+      <div id="rules-empty" class="empty-state">
+        <div class="empty-icon">🔍</div>
+        <div class="empty-title">Run Analysis First</div>
+      </div>
+      <div id="rules-content" style="display:none;">
+        <div class="section-label">Western Electric / Nelson Rules Check</div>
+        <div class="rules-list" id="rules-list"></div>
+        <div class="section-label" style="margin-top:20px;">Out-of-Control Points Detail</div>
+        <div id="oor-detail"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Notification -->
+<div class="notif hide" id="notif"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+// ── SPC CONSTANTS for n=5 ──────────────────────────────────────────────────
+const SPC_CONST = { A2:0.577, D3:0, D4:2.114, D2:2.326, d2:2.326, c4:0.9400 };
+
+// ── CHARTS REGISTRY ───────────────────────────────────────────────────────
+let charts = {};
+let currentData = null;
+
+// ── DEMO DATA ──────────────────────────────────────────────────────────────
+const DEMO = [
+  [391.03,390.95,391.12,391.07,390.88],[391.20,391.08,391.15,390.98,391.22],
+  [390.97,391.05,390.89,391.18,391.01],[391.30,391.14,391.22,391.08,391.25],
+  [390.85,390.92,391.10,390.97,391.05],[391.18,391.25,391.09,391.30,391.12],
+  [391.02,390.95,390.88,391.15,391.08],[391.35,391.18,391.28,391.22,391.30],
+  [390.92,391.08,391.00,390.85,391.12],[391.25,391.10,391.18,391.05,391.22],
+  [391.08,391.20,391.15,391.28,391.00],[390.88,390.95,391.05,390.92,391.10],
+  [391.22,391.15,391.30,391.08,391.18],[391.00,391.12,390.95,391.08,391.05],
+  [391.28,391.20,391.35,391.15,391.22],[390.95,391.05,390.88,391.10,390.98],
+  [391.15,391.22,391.08,391.18,391.12],[391.05,390.92,391.18,391.00,391.08],
+  [391.30,391.15,391.22,391.28,391.10],[390.90,391.02,390.95,391.08,390.85],
+  [391.18,391.25,391.12,391.20,391.08],[391.08,391.00,391.15,390.95,391.05],
+  [391.35,391.22,391.28,391.18,391.30],[390.95,391.10,391.00,391.05,390.88],
+  [391.20,391.12,391.25,391.08,391.18]
+];
+
+function loadDemo() {
+  if(!guardAction()) return;
+  document.getElementById('data-input').value = DEMO.map(r=>r.join('\t')).join('\n');
+  document.getElementById('f-company').value = 'Polyplastics Industries (I) Pvt. Ltd.';
+  document.getElementById('f-customer').value = 'ABC Automotive Components Ltd.';
+  document.getElementById('f-partname').value = 'Bearing Housing Cover';
+  document.getElementById('f-partno').value = 'BHC-391-A';
+  document.getElementById('f-char').value = 'OD Diameter (mm)';
+  document.getElementById('f-machine').value = 'CNC Lathe – MCL-12';
+  document.getElementById('f-instr').value = 'Vernier Caliper 0.01mm';
+  document.getElementById('f-spcno').value = 'SPC-2024-001';
+  document.getElementById('f-nominal').value = '391.40';
+  document.getElementById('f-tol').value = '2.00';
+  document.getElementById('f-usl').value = '393.40';
+  document.getElementById('f-lsl').value = '389.40';
+  document.getElementById('f-date').value = new Date().toISOString().split('T')[0];
+  document.getElementById('f-prepby').value = 'Quality Engineer';
+  updateDataStatus();
+  notify('Demo data loaded! Click ▶ Analyse to continue.', 'success');
+}
+
+function clearAll() {
+  clearDataOnly();
+  ['f-company','f-customer','f-partname','f-partno','f-char','f-machine','f-instr','f-spcno','f-nominal','f-tol','f-usl','f-lsl','f-prepby'].forEach(id => document.getElementById(id).value='');
+  document.getElementById('f-date').value = '';
+  currentData = null;
+  hideResults();
+  notify('All data cleared.', 'success');
+}
+
+function clearDataOnly() {
+  document.getElementById('data-input').value = '';
+  updateDataStatus();
+}
+
+function updateDataStatus() {
+  const raw = document.getElementById('data-input').value.trim();
+  const rows = raw ? raw.split('\n').filter(r=>r.trim()) : [];
+  document.getElementById('data-status').textContent = rows.length ? `${rows.length} rows detected` : '';
+}
+
+document.getElementById('data-input').addEventListener('input', updateDataStatus);
+
+// ── FILE UPLOAD ────────────────────────────────────────────────────────────
+function handleFileUpload(e) {
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    document.getElementById('data-input').value = ev.target.result;
+    updateDataStatus();
+    notify(`File "${file.name}" loaded.`, 'success');
+  };
+  reader.readAsText(file);
+}
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('upload-zone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    document.getElementById('data-input').value = ev.target.result;
+    updateDataStatus();
+    notify(`File "${file.name}" dropped and loaded.`, 'success');
+  };
+  reader.readAsText(file);
+}
+
+// ── FORMAT DATA ────────────────────────────────────────────────────────────
+function formatData() {
+  const raw = document.getElementById('data-input').value;
+  const parsed = parseData(raw);
+  if(parsed.length === 0) { notify('No parseable data found.', 'error'); return; }
+  document.getElementById('data-input').value = parsed.map(r=>r.map(v=>v.toFixed(4)).join('\t')).join('\n');
+  notify(`Formatted ${parsed.length} subgroups.`, 'success');
+}
+
+// ── PARSE ──────────────────────────────────────────────────────────────────
+function parseData(raw) {
+  if(!raw.trim()) return [];
+  return raw.trim().split('\n')
+    .map(line => line.trim().split(/[\t,;\s]+/).map(Number).filter(n=>!isNaN(n)))
+    .filter(row => row.length >= 2);
+}
+
+// ── COMPUTE SPC ────────────────────────────────────────────────────────────
+function computeSPC(matrix) {
+  const n = matrix[0].length;
+  const k = matrix.length;
+  const subgroups = matrix.map((row, i) => {
+    const xbar = row.reduce((a,b)=>a+b,0) / n;
+    const xmax = Math.max(...row), xmin = Math.min(...row);
+    const R = xmax - xmin;
+    return { i: i+1, obs: row, xbar, xmax, xmin, R };
+  });
+  const xdbar = subgroups.reduce((a,s)=>a+s.xbar,0) / k;
+  const rbar  = subgroups.reduce((a,s)=>a+s.R,0) / k;
+  const { A2, D3, D4, D2, c4 } = SPC_CONST;
+  const UCL_X = xdbar + A2 * rbar;
+  const LCL_X = xdbar - A2 * rbar;
+  const UCL_R = D4 * rbar;
+  const LCL_R = D3 * rbar;
+  const sigma_within = rbar / D2;
+  const allVals = matrix.flat();
+  const mean_all = allVals.reduce((a,b)=>a+b,0) / allVals.length;
+  const sigma_overall = Math.sqrt(allVals.reduce((a,v)=>a+(v-mean_all)**2,0) / (allVals.length-1));
+  // 1-sigma zones for rules
+  const s1 = sigma_within;
+  return { subgroups, xdbar, rbar, UCL_X, LCL_X, UCL_R, LCL_R, sigma_within, sigma_overall, mean_all, n, k, allVals, s1 };
+}
+
+// ── RULE CHECKS ────────────────────────────────────────────────────────────
+function checkRules(data) {
+  const { subgroups, xdbar, UCL_X, LCL_X, s1 } = data;
+  const x = subgroups.map(s=>s.xbar);
+  const violations = { xbar: {}, r: {} };
+
+  function markVio(chart, rule, idxs) {
+    idxs.forEach(i => {
+      if(!violations[chart][i]) violations[chart][i] = [];
+      violations[chart][i].push(rule);
+    });
+  }
+
+  if(document.getElementById('rule1').checked) {
+    x.forEach((v,i) => { if(v>UCL_X||v<LCL_X) markVio('xbar','R1',[i]); });
+    subgroups.forEach((s,i) => { if(s.R>data.UCL_R) markVio('r','R1',[i]); });
+  }
+  if(document.getElementById('rule2').checked) {
+    for(let i=8;i<x.length;i++) {
+      const run = x.slice(i-8,i+1);
+      if(run.every(v=>v>xdbar)||run.every(v=>v<xdbar)) markVio('xbar','R2',[i]);
+    }
+  }
+  if(document.getElementById('rule3').checked) {
+    for(let i=5;i<x.length;i++) {
+      const run = x.slice(i-5,i+1);
+      const asc = run.every((v,j)=>j===0||v>run[j-1]);
+      const desc = run.every((v,j)=>j===0||v<run[j-1]);
+      if(asc||desc) markVio('xbar','R3',[i]);
+    }
+  }
+  if(document.getElementById('rule4').checked) {
+    for(let i=13;i<x.length;i++) {
+      const run = x.slice(i-13,i+1);
+      const alt = run.every((v,j)=>j===0||(j%2===1?(v>run[j-1]):(v<run[j-1])));
+      const alt2 = run.every((v,j)=>j===0||(j%2===1?(v<run[j-1]):(v>run[j-1])));
+      if(alt||alt2) markVio('xbar','R4',[i]);
+    }
+  }
+  if(document.getElementById('rule5').checked) {
+    const z2 = xdbar + 2*s1, l2 = xdbar - 2*s1;
+    for(let i=2;i<x.length;i++) {
+      const w = x.slice(i-2,i+1);
+      if(w.filter(v=>v>z2).length>=2||w.filter(v=>v<l2).length>=2) markVio('xbar','R5',[i]);
+    }
+  }
+  if(document.getElementById('rule6').checked) {
+    const z1p = xdbar + s1, l1p = xdbar - s1;
+    for(let i=4;i<x.length;i++) {
+      const w = x.slice(i-4,i+1);
+      if(w.filter(v=>v>z1p).length>=4||w.filter(v=>v<l1p).length>=4) markVio('xbar','R6',[i]);
+    }
+  }
+  return violations;
+}
+
+// ── CAPABILITY ─────────────────────────────────────────────────────────────
+function computeCapability(data, USL, LSL) {
+  if(isNaN(USL)||isNaN(LSL)) return null;
+  const { sigma_within, sigma_overall, xdbar, mean_all } = data;
+  const Cp   = (USL-LSL) / (6*sigma_within);
+  const Cpu  = (USL-xdbar) / (3*sigma_within);
+  const Cpl  = (xdbar-LSL) / (3*sigma_within);
+  const Cpk  = Math.min(Cpu,Cpl);
+  const Pp   = (USL-LSL) / (6*sigma_overall);
+  const Ppu  = (USL-mean_all) / (3*sigma_overall);
+  const Ppl  = (mean_all-LSL) / (3*sigma_overall);
+  const Ppk  = Math.min(Ppu,Ppl);
+  const NOMINAL = (USL+LSL)/2;
+  const K = 2*Math.abs(NOMINAL-xdbar)/(USL-LSL);
+  return { Cp, Cpu, Cpl, Cpk, Pp, Ppu, Ppl, Ppk, K, sigma_within, sigma_overall };
+}
+
+// ── MAIN ANALYSIS ──────────────────────────────────────────────────────────
+function runAnalysis() {
+  if(!guardAction()) return;
+  const raw = document.getElementById('data-input').value;
+  const matrix = parseData(raw);
+  if(matrix.length === 0) { notify('No data found. Paste data or load demo.','error'); return; }
+  if(matrix.some(r=>r.length !== matrix[0].length)) { notify('Rows have unequal column counts. Check data.','error'); return; }
+
+  currentData = computeSPC(matrix);
+  const violations = checkRules(currentData);
+
+  const USL = parseFloat(document.getElementById('f-usl').value) ||
+    (parseFloat(document.getElementById('f-nominal').value) + parseFloat(document.getElementById('f-tol').value)) || NaN;
+  const LSL = parseFloat(document.getElementById('f-lsl').value) ||
+    (parseFloat(document.getElementById('f-nominal').value) - parseFloat(document.getElementById('f-tol').value)) || NaN;
+  const cap = computeCapability(currentData, USL, LSL);
+  currentData.USL = USL; currentData.LSL = LSL; currentData.cap = cap;
+
+  renderCharts(currentData, violations);
+  renderSummary(currentData, violations);
+  renderCapability(currentData, cap);
+  renderRules(currentData, violations);
+  updatePrintHeader();
+
+  showResults();
+  switchTab('charts', document.querySelectorAll('.tab-btn')[1]);
+  notify(`Analysis complete: ${matrix.length} subgroups × ${matrix[0].length} observations.`, 'success');
+}
+
+// ── RENDER CHARTS ──────────────────────────────────────────────────────────
+function destroyChart(id) { if(charts[id]) { charts[id].destroy(); delete charts[id]; } }
+
+function getCssVar(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function renderCharts(d, violations) {
+  const labels = d.subgroups.map(s=>s.i);
+  const xbars  = d.subgroups.map(s=>s.xbar);
+  const Rs     = d.subgroups.map(s=>s.R);
+
+  // Live theme colors
+  const C_UCL    = getCssVar('--ucl-color')    || '#f85149';
+  const C_CL     = getCssVar('--cl-color')     || '#3fb950';
+  const C_LCL    = getCssVar('--lcl-color')    || '#58a6ff';
+  const C_XBAR   = getCssVar('--xbar-color')   || '#f0883e';
+  const C_R      = getCssVar('--r-color')      || '#bc8cff';
+  const C_RED    = getCssVar('--red')          || '#f85149';
+  const C_YELLOW = getCssVar('--yellow')       || '#d29922';
+  const C_TEXT2  = getCssVar('--text2')        || '#8b949e';
+  const C_TEXT3  = getCssVar('--text3')        || '#6e7681';
+  const C_BORDER = getCssVar('--border')       || '#30363d';
+  const C_ACCENT3= getCssVar('--accent3')      || '#58a6ff';
+  const violXbar = violations.xbar;
+  const violR    = violations.r;
+
+  const pointColorX = xbars.map((_,i) => Object.keys(violXbar).includes(String(i)) ? C_RED : C_XBAR);
+  const pointColorR = Rs.map((_,i) => Object.keys(violR).includes(String(i)) ? C_RED : C_R);
+  const pointSizeX = xbars.map((_,i) => Object.keys(violXbar).includes(String(i)) ? 6 : 3.5);
+  const pointSizeR = Rs.map((_,i) => Object.keys(violR).includes(String(i)) ? 6 : 3.5);
+
+  const gridColor = C_BORDER + '80';
+  const baseOpts = {
+    responsive: true, animation: false,
+    plugins: { legend: { display: false }, tooltip: { mode:'index', intersect:false, backgroundColor: getCssVar('--surface2')||'rgba(22,27,34,0.9)', titleColor: C_TEXT2, bodyColor: C_TEXT3, borderColor: C_BORDER, borderWidth:1, titleFont:{family:'DM Mono'}, bodyFont:{family:'DM Mono',size:11} } },
+    scales: {
+      x: { ticks:{ color:C_TEXT2, font:{size:10,family:'DM Mono'} }, grid:{ color:gridColor }, title:{ display:true, text:'Subgroup Number', color:C_TEXT3, font:{size:10} } },
+      y: { ticks:{ color:C_TEXT2, font:{size:10,family:'DM Mono'} }, grid:{ color:gridColor } }
+    }
+  };
+
+  // ── X-BAR ──
+  destroyChart('xbar');
+  document.getElementById('xbar-subtitle').textContent =
+    `UCL=${d.UCL_X.toFixed(4)}  X̿=${d.xdbar.toFixed(4)}  LCL=${d.LCL_X.toFixed(4)}`;
+  charts['xbar'] = new Chart(document.getElementById('xbarChart'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { label:'UCL', data:Array(d.k).fill(d.UCL_X), borderColor:C_UCL, borderWidth:1.2, borderDash:[5,3], pointRadius:0, fill:false },
+        { label:'X̿+2σ', data:Array(d.k).fill(d.xdbar+2*d.s1), borderColor:C_UCL+'55', borderWidth:0.8, borderDash:[3,4], pointRadius:0, fill:false },
+        { label:'X̿+1σ', data:Array(d.k).fill(d.xdbar+d.s1), borderColor:C_YELLOW+'66', borderWidth:0.8, borderDash:[3,4], pointRadius:0, fill:false },
+        { label:'CL', data:Array(d.k).fill(d.xdbar), borderColor:C_CL, borderWidth:1.5, borderDash:[6,3], pointRadius:0, fill:false },
+        { label:'X̿-1σ', data:Array(d.k).fill(d.xdbar-d.s1), borderColor:C_YELLOW+'66', borderWidth:0.8, borderDash:[3,4], pointRadius:0, fill:false },
+        { label:'X̿-2σ', data:Array(d.k).fill(d.xdbar-2*d.s1), borderColor:C_LCL+'55', borderWidth:0.8, borderDash:[3,4], pointRadius:0, fill:false },
+        { label:'LCL', data:Array(d.k).fill(d.LCL_X), borderColor:C_LCL, borderWidth:1.2, borderDash:[5,3], pointRadius:0, fill:false },
+        { label:'X̄', data:xbars, borderColor:C_XBAR, backgroundColor:C_XBAR+'18', borderWidth:1.8, pointRadius:pointSizeX, pointBackgroundColor:pointColorX, pointBorderColor:pointColorX, tension:0.15 }
+      ]
+    },
+    options:{...baseOpts, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, title:{display:true,text:'Subgroup Mean X̄',color:C_TEXT3,font:{size:10}}}}}
+  });
+
+  // ── R-CHART ──
+  destroyChart('r');
+  document.getElementById('r-subtitle').textContent =
+    `UCL=${d.UCL_R.toFixed(4)}  R̄=${d.rbar.toFixed(4)}  LCL=${d.LCL_R.toFixed(4)}`;
+  charts['r'] = new Chart(document.getElementById('rChart'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { label:'UCL(R)', data:Array(d.k).fill(d.UCL_R), borderColor:C_UCL, borderWidth:1.2, borderDash:[5,3], pointRadius:0 },
+        { label:'R̄', data:Array(d.k).fill(d.rbar), borderColor:C_CL, borderWidth:1.5, borderDash:[6,3], pointRadius:0 },
+        { label:'LCL(R)', data:Array(d.k).fill(d.LCL_R), borderColor:C_LCL, borderWidth:1.2, borderDash:[5,3], pointRadius:0 },
+        { label:'R', data:Rs, borderColor:C_R, backgroundColor:C_R+'18', borderWidth:1.8, pointRadius:pointSizeR, pointBackgroundColor:pointColorR, pointBorderColor:pointColorR, tension:0.15 }
+      ]
+    },
+    options:{...baseOpts, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, title:{display:true,text:'Range R',color:C_TEXT3,font:{size:10}}}}}
+  });
+
+  // ── HISTOGRAM ──
+  destroyChart('hist');
+  const allV = d.allVals;
+  const nBins = Math.max(8, Math.round(1+3.322*Math.log10(allV.length)));
+  const vMin = Math.min(...allV), vMax = Math.max(...allV);
+  const bw = (vMax-vMin)/nBins;
+  const bins = Array.from({length:nBins},(_,i)=>({ from:vMin+i*bw, to:vMin+(i+1)*bw, count:0 }));
+  allV.forEach(v=>{ const idx=Math.min(Math.floor((v-vMin)/bw),nBins-1); bins[idx].count++; });
+  const histLabels = bins.map(b=>((b.from+b.to)/2).toFixed(3));
+  const histCounts = bins.map(b=>b.count);
+  const mu = d.mean_all, sig = d.sigma_overall;
+  const normalCurve = bins.map(b=>{
+    const x=(b.from+b.to)/2;
+    return (allV.length*bw/(sig*Math.sqrt(2*Math.PI)))*Math.exp(-0.5*((x-mu)/sig)**2);
+  });
+  const { USL, LSL } = d;
+  const barColors = bins.map(b=>{
+    if(!isNaN(USL)&&b.from>=USL) return C_RED+'99';
+    if(!isNaN(LSL)&&b.to<=LSL) return C_RED+'99';
+    return C_ACCENT3+'99';
+  });
+  document.getElementById('hist-subtitle').textContent = `μ=${mu.toFixed(4)}  σ=${sig.toFixed(4)}  n=${allV.length}`;
+  const histDatasets = [
+    { type:'bar', label:'Frequency', data:histCounts, backgroundColor:barColors, borderColor:C_ACCENT3, borderWidth:0.5, yAxisID:'y' },
+    { type:'line', label:'Normal Curve', data:normalCurve, borderColor:C_XBAR, borderWidth:2, pointRadius:0, fill:false, tension:0.4, yAxisID:'y' }
+  ];
+  if(!isNaN(USL)) histDatasets.push({ type:'line', label:'USL', data:Array(nBins).fill(null).map((_,i)=>i===nBins-1?Math.max(...histCounts)*1.1:null), borderColor:C_RED, borderWidth:1, pointRadius:0, yAxisID:'y' });
+
+  charts['hist'] = new Chart(document.getElementById('histChart'), {
+    type:'bar',
+    data:{ labels:histLabels, datasets: histDatasets },
+    options:{
+      responsive:true, animation:false,
+      plugins:{ legend:{display:false} },
+      scales:{
+        x:{ ticks:{color:C_TEXT2,font:{size:9,family:'DM Mono'},maxRotation:45}, grid:{color:gridColor}, title:{display:true,text:'Measurement Value',color:C_TEXT3,font:{size:10}} },
+        y:{ ticks:{color:C_TEXT2,font:{size:10}}, grid:{color:gridColor}, title:{display:true,text:'Frequency',color:C_TEXT3,font:{size:10}} }
+      }
+    }
+  });
+
+  // violations badges
+  renderViolationBadges('xbar-violations', violations.xbar);
+  renderViolationBadges('r-violations', violations.r);
+}
+
+function renderViolationBadges(id, vio) {
+  const el = document.getElementById(id);
+  const keys = Object.keys(vio);
+  if(keys.length===0){ el.innerHTML='<span style="font-size:10px;color:var(--accent2);">✓ No violations detected</span>'; return; }
+  el.innerHTML = keys.map(i=>`<span class="vio-badge">SG${parseInt(i)+1}: ${vio[i].join(',')}</span>`).join('');
+}
+
+// ── RENDER SUMMARY ──────────────────────────────────────────────────────────
+function renderSummary(d, violations) {
+  const allVio = new Set([...Object.keys(violations.xbar), ...Object.keys(violations.r)].map(Number));
+  const { xdbar, rbar, UCL_X, LCL_X, UCL_R, LCL_R, sigma_within, sigma_overall, allVals } = d;
+
+  // KPIs
+  document.getElementById('kpi-grid').innerHTML = [
+    { label:'Grand Mean (X̿)', val:xdbar.toFixed(4), sub:'Overall process mean' },
+    { label:'Avg Range (R̄)', val:rbar.toFixed(4), sub:`n=${d.n}` },
+    { label:'σ Within', val:sigma_within.toFixed(5), sub:'From R̄/d₂' },
+    { label:'σ Overall', val:sigma_overall.toFixed(5), sub:'Sample std dev' },
+    { label:'UCL (X̄)', val:UCL_X.toFixed(4), sub:`X̿ + A₂×R̄`, cls:'red' },
+    { label:'LCL (X̄)', val:LCL_X.toFixed(4), sub:`X̿ − A₂×R̄`, cls:'lcl' },
+    { label:'UCL (R)', val:UCL_R.toFixed(4), sub:`D₄×R̄`, cls:'red' },
+    { label:'Violations', val:allVio.size, sub:`Subgroups out of control`, cls: allVio.size>0?'red':'green' }
+  ].map(k=>`
+    <div class="kpi-card">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value ${k.cls||''}" style="${k.cls==='lcl'?'color:var(--accent3)':''}">${k.val}</div>
+      <div class="kpi-sub">${k.sub}</div>
+    </div>`).join('');
+
+  // Main table
+  const tb = document.getElementById('spc-table');
+  tb.innerHTML = '';
+  const hdr = tb.insertRow();
+  ['SG#','Obs 1','Obs 2','Obs 3','Obs 4','Obs 5','X̄','R','X̄ Status','R Status'].forEach(h=>{
+    const th=document.createElement('th'); th.textContent=h; hdr.appendChild(th);
+  });
+  d.subgroups.forEach((s,i)=>{
+    const tr = tb.insertRow();
+    const xOOR = s.xbar>UCL_X||s.xbar<LCL_X;
+    const rOOR = s.R>UCL_R;
+    const xVio = violations.xbar[i];
+    const rVio = violations.r[i];
+    const addTd = (val,cls='')=>{ const td=tr.insertCell(); td.textContent=val; if(cls) td.className=cls; };
+    addTd(s.i,'sg-num');
+    s.obs.forEach(v=>addTd(v.toFixed(4)));
+    const tdX=tr.insertCell(); tdX.textContent=s.xbar.toFixed(4); tdX.className=xOOR?'oor':(xVio?'warn':'ok');
+    const tdR=tr.insertCell(); tdR.textContent=s.R.toFixed(4); tdR.className=rOOR?'oor':(rVio?'warn':'ok');
+    const tdXS=tr.insertCell(); tdXS.textContent=xOOR?'OOR':(xVio?xVio.join(','):'IN'); tdXS.className=xOOR?'oor':(xVio?'warn':'ok');
+    const tdRS=tr.insertCell(); tdRS.textContent=rOOR?'OOR':(rVio?rVio.join(','):'IN'); tdRS.className=rOOR?'oor':(rVio?'warn':'ok');
+  });
+
+  // CL summary
+  document.getElementById('cl-summary-table').innerHTML = `
+    <table class="spc-table" style="max-width:600px;">
+      <tr><th>Chart</th><th>UCL</th><th>CL</th><th>LCL</th><th>A₂</th><th>D₃</th><th>D₄</th></tr>
+      <tr>
+        <td>X̄ Chart</td>
+        <td class="oor">${UCL_X.toFixed(5)}</td>
+        <td class="ok">${xdbar.toFixed(5)}</td>
+        <td style="color:var(--accent3)">${LCL_X.toFixed(5)}</td>
+        <td>${SPC_CONST.A2}</td><td>—</td><td>—</td>
+      </tr>
+      <tr>
+        <td>R Chart</td>
+        <td class="oor">${UCL_R.toFixed(5)}</td>
+        <td class="ok">${rbar.toFixed(5)}</td>
+        <td style="color:var(--accent3)">${LCL_R.toFixed(5)}</td>
+        <td>—</td><td>${SPC_CONST.D3}</td><td>${SPC_CONST.D4}</td>
+      </tr>
+    </table>`;
+}
+
+// ── RENDER CAPABILITY ───────────────────────────────────────────────────────
+function renderCapability(d, cap) {
+  if(!cap) {
+    document.getElementById('cap-empty').style.display='flex';
+    document.getElementById('cap-content').style.display='none';
+    return;
+  }
+  document.getElementById('cap-empty').style.display='none';
+  document.getElementById('cap-content').style.display='block';
+
+  const cpkClass = cap.Cpk>=1.67?'green':cap.Cpk>=1.33?'green':cap.Cpk>=1.0?'yellow':'red';
+  const conclusion = cap.Cpk>=1.67?'EXCELLENT':cap.Cpk>=1.33?'CAPABLE':cap.Cpk>=1.0?'MARGINAL — MONITOR':'NOT CAPABLE — ACTION REQUIRED';
+  const conclusionColor = cap.Cpk>=1.33?'var(--accent2)':cap.Cpk>=1.0?'var(--yellow)':'var(--red)';
+
+  document.getElementById('cap-kpi').innerHTML = [
+    { label:'Cp', val:cap.Cp.toFixed(4), sub:'Potential capability', cls:cap.Cp>=1.33?'green':cap.Cp>=1?'yellow':'red' },
+    { label:'Cpk', val:cap.Cpk.toFixed(4), sub:'Actual capability (within)', cls:cpkClass },
+    { label:'Pp', val:cap.Pp.toFixed(4), sub:'Performance index', cls:cap.Pp>=1.33?'green':cap.Pp>=1?'yellow':'red' },
+    { label:'Ppk', val:cap.Ppk.toFixed(4), sub:'Actual performance (overall)', cls:cap.Ppk>=1.33?'green':cap.Ppk>=1?'yellow':'red' },
+  ].map(k=>`
+    <div class="kpi-card">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value ${k.cls}">${k.val}</div>
+      <div class="kpi-sub">${k.sub}</div>
+      <div class="gauge-bar"><div class="gauge-fill" style="width:${Math.min(parseFloat(k.val)/2*100,100)}%;background:${k.cls==='green'?'var(--accent2)':k.cls==='yellow'?'var(--yellow)':'var(--red)'}"></div></div>
+    </div>`).join('');
+
+  document.getElementById('cap-details').innerHTML = `
+    <div class="cap-card">
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px;margin-bottom:12px;">Short-Term (Within) Capability</div>
+      ${[['Cp',cap.Cp],['Cpu (Upper)',cap.Cpu],['Cpl (Lower)',cap.Cpl],['Cpk',cap.Cpk],['σ (Within)',cap.sigma_within],['K (Shift)',cap.K]].map(([n,v])=>`
+      <div class="cap-row"><span class="cap-name">${n}</span><span class="cap-val" style="color:${v>=1.33?'var(--accent2)':v>=1?'var(--yellow)':'var(--red)'}">${v.toFixed(4)}</span></div>`).join('')}
+    </div>
+    <div class="cap-card">
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px;margin-bottom:12px;">Long-Term (Overall) Performance</div>
+      ${[['Pp',cap.Pp],['Ppu (Upper)',cap.Ppu],['Ppl (Lower)',cap.Ppl],['Ppk',cap.Ppk],['σ (Overall)',cap.sigma_overall]].map(([n,v])=>`
+      <div class="cap-row"><span class="cap-name">${n}</span><span class="cap-val" style="color:${v>=1.33?'var(--accent2)':v>=1?'var(--yellow)':'var(--red)'}">${v.toFixed(4)}</span></div>`).join('')}
+      <div class="cap-row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;">
+        <span class="cap-name" style="font-weight:600;font-size:13px;">Conclusion</span>
+        <span style="font-weight:700;font-size:13px;color:${conclusionColor}">${conclusion}</span>
+      </div>
+    </div>`;
+
+  // Capability chart
+  destroyChart('cap');
+  const { USL, LSL, mean_all, sigma_overall } = d;
+  const xMin2 = Math.min(mean_all - 4*sigma_overall, LSL - (USL-LSL)*0.1);
+  const xMax2 = Math.max(mean_all + 4*sigma_overall, USL + (USL-LSL)*0.1);
+  const nPts = 100;
+  const step = (xMax2-xMin2)/nPts;
+  const xs = Array.from({length:nPts},(_,i)=>xMin2+i*step);
+  const ys = xs.map(x=>(1/(sigma_overall*Math.sqrt(2*Math.PI)))*Math.exp(-0.5*((x-mean_all)/sigma_overall)**2));
+  const uslIdx = xs.findIndex(x=>x>=USL);
+  const lslIdx = xs.findIndex(x=>x>=LSL);
+  charts['cap'] = new Chart(document.getElementById('capChart'),{
+    type:'line',
+    data:{ labels:xs.map(x=>x.toFixed(3)), datasets:[
+      { label:'Distribution', data:ys, borderColor:getCssVar('--accent3'), backgroundColor:getCssVar('--accent3')+'1a', borderWidth:2, pointRadius:0, fill:true, tension:0.4 },
+      { label:'USL', data:xs.map((_,i)=>i===uslIdx?Math.max(...ys)*1.1:null), borderColor:getCssVar('--red'), borderWidth:1.5, borderDash:[4,2], pointRadius:0, spanGaps:false },
+      { label:'LSL', data:xs.map((_,i)=>i===lslIdx?Math.max(...ys)*1.1:null), borderColor:getCssVar('--red'), borderWidth:1.5, borderDash:[4,2], pointRadius:0, spanGaps:false },
+    ]},
+    options:{ responsive:true, animation:false,
+      plugins:{ legend:{display:false} },
+      scales:{ x:{ticks:{color:getCssVar('--text2'),font:{size:9,family:'DM Mono'},maxTicksLimit:12},grid:{color:getCssVar('--border')+'80'}}, y:{ticks:{color:getCssVar('--text2'),font:{size:9}},grid:{color:getCssVar('--border')+'80'}} }
+    }
+  });
+}
+
+// ── RENDER RULES ────────────────────────────────────────────────────────────
+function renderRules(d, violations) {
+  document.getElementById('rules-empty').style.display='none';
+  document.getElementById('rules-content').style.display='block';
+
+  const rulesMeta = [
+    { id:'R1', name:'Rule 1 – Beyond Control Limits', desc:'Any point beyond UCL or LCL (±3σ)', chart:'X̄ & R' },
+    { id:'R2', name:'Rule 2 – Long Run', desc:'9 or more consecutive points on same side of centre line', chart:'X̄' },
+    { id:'R3', name:'Rule 3 – Trend', desc:'6 or more consecutive points trending up or down', chart:'X̄' },
+    { id:'R4', name:'Rule 4 – Oscillation', desc:'14 or more consecutive points alternating up-down', chart:'X̄' },
+    { id:'R5', name:'Rule 5 – 2 of 3', desc:'2 of 3 consecutive points beyond ±2σ zone', chart:'X̄' },
+    { id:'R6', name:'Rule 6 – 4 of 5', desc:'4 of 5 consecutive points beyond ±1σ zone', chart:'X̄' },
+  ];
+
+  const allXVio = Object.values(violations.xbar).flat();
+  const allRVio = Object.values(violations.r).flat();
+
+  document.getElementById('rules-list').innerHTML = rulesMeta.map(r=>{
+    const fired = allXVio.includes(r.id)||allRVio.includes(r.id);
+    return `<div class="rule-item">
+      <div class="rule-icon ${fired?'fail':'pass'}">${fired?'✗':'✓'}</div>
+      <div><div class="rule-name" style="color:${fired?'var(--red)':'var(--accent2)'}">${r.name}</div>
+      <div class="rule-desc">${r.desc} — Chart: ${r.chart}</div></div>
+    </div>`;
+  }).join('');
+
+  const allVioIdxX = Object.entries(violations.xbar);
+  const allVioIdxR = Object.entries(violations.r);
+  let html = '';
+  if(allVioIdxX.length===0&&allVioIdxR.length===0){
+    html='<div style="color:var(--accent2);font-size:13px;padding:16px;">✓ No out-of-control points detected. Process appears stable.</div>';
+  } else {
+    html='<div class="data-table-wrap"><table class="spc-table"><tr><th>Chart</th><th>Subgroup</th><th>Value</th><th>Rules Violated</th><th>Control Limits</th></tr>';
+    allVioIdxX.forEach(([i,rules])=>{
+      const s=d.subgroups[parseInt(i)];
+      html+=`<tr><td>X̄</td><td class="oor">SG ${s.i}</td><td class="oor">${s.xbar.toFixed(4)}</td><td class="warn">${rules.join(', ')}</td><td style="font-size:10px;color:var(--text3)">[${d.LCL_X.toFixed(4)}, ${d.UCL_X.toFixed(4)}]</td></tr>`;
+    });
+    allVioIdxR.forEach(([i,rules])=>{
+      const s=d.subgroups[parseInt(i)];
+      html+=`<tr><td>R</td><td class="oor">SG ${s.i}</td><td class="oor">${s.R.toFixed(4)}</td><td class="warn">${rules.join(', ')}</td><td style="font-size:10px;color:var(--text3)">[${d.LCL_R.toFixed(4)}, ${d.UCL_R.toFixed(4)}]</td></tr>`;
+    });
+    html+='</table></div>';
+  }
+  document.getElementById('oor-detail').innerHTML = html;
+}
+
+// ── UI HELPERS ──────────────────────────────────────────────────────────────
+function showResults() {
+  document.getElementById('charts-empty').style.display='none';
+  document.getElementById('charts-content').style.display='block';
+  document.getElementById('summary-empty').style.display='none';
+  document.getElementById('summary-content').style.display='block';
+}
+function hideResults() {
+  ['charts-empty','summary-empty','cap-empty','rules-empty'].forEach(id=>{
+    document.getElementById(id).style.display='flex';
+  });
+  ['charts-content','summary-content','cap-content','rules-content'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.style.display='none';
+  });
+  ['xbar','r','hist','cap'].forEach(k=>destroyChart(k));
+}
+function switchTab(id, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+}
+function notify(msg, type='success') {
+  const el = document.getElementById('notif');
+  el.textContent = msg;
+  el.className = `notif ${type}`;
+  setTimeout(()=>{ el.classList.add('hide'); }, 3500);
+}
+function updatePrintHeader() {
+  const company = document.getElementById('f-company').value||'—';
+  const part = document.getElementById('f-partname').value;
+  const char = document.getElementById('f-char').value;
+  const date = document.getElementById('f-date').value;
+  document.getElementById('ph-company').textContent = company;
+  document.getElementById('ph-sub').textContent = [part,char].filter(Boolean).join(' · ') || 'SPC Analysis Report';
+  document.getElementById('ph-meta').textContent = [document.getElementById('f-spcno').value, date].filter(Boolean).join('  |  ');
+}
+
+// ── TOLERANCE AUTO-FILL ─────────────────────────────────────────────────────
+document.getElementById('f-nominal').addEventListener('input',autoFillSpec);
+document.getElementById('f-tol').addEventListener('input',autoFillSpec);
+function autoFillSpec() {
+  const n = parseFloat(document.getElementById('f-nominal').value);
+  const t = parseFloat(document.getElementById('f-tol').value);
+  if(!isNaN(n)&&!isNaN(t)) {
+    document.getElementById('f-usl').value = (n+t).toFixed(3);
+    document.getElementById('f-lsl').value = (n-t).toFixed(3);
+  }
+}
+
+// ── INIT ────────────────────────────────────────────────────────────────────
+document.getElementById('f-date').value = new Date().toISOString().split('T')[0];
+
+// ── THEME SWITCHER ────────────────────────────────────────────────────────
+const THEME_COLORS = {
+  '':        ['#f0883e','#3fb950','#58a6ff'],
+  'ocean':   ['#00d4ff','#00e5a0','#ffb347'],
+  'sunset':  ['#e8520a','#2d9e4f','#1a6fc4'],
+  'forest':  ['#00ff88','#ffdd00','#00ccff'],
+  'lavender':['#6c3fc4','#28a860','#e85090'],
+  'steel':   ['#4db8ff','#44dd88','#ffaa22'],
+};
+
+function applyTheme(theme, btn) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.querySelectorAll('.swatch-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  // Update topbar dots
+  const cols = THEME_COLORS[theme] || THEME_COLORS[''];
+  document.getElementById('theme-current-dots').innerHTML =
+    cols.map(c=>`<span style="width:8px;height:8px;border-radius:50%;background:${c};display:inline-block;"></span>`).join('');
+  document.getElementById('theme-swatches').classList.remove('open');
+  // Re-render charts if data exists
+  if(currentData) {
+    const violations = checkRules(currentData);
+    renderCharts(currentData, violations);
+  }
+}
+
+function toggleThemePanel() {
+  document.getElementById('theme-swatches').classList.toggle('open');
+}
+// Close on outside click
+document.addEventListener('click', e => {
+  const sw = document.querySelector('.theme-switcher');
+  if(sw && !sw.contains(e.target)) {
+    document.getElementById('theme-swatches').classList.remove('open');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  LICENSE SYSTEM
+// ═══════════════════════════════════════════════════════════════
+let _isRO = false;
+let _licData = null;
+const _SESS = 'spc_lic_sess';
+
+function fmtGateKey(el) {
+  let v = el.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+  let o = '';
+  for(let i=0;i<Math.min(v.length,16);i++){if(i===3||i===7||i===11)o+='-';o+=v[i];}
+  el.value = o;
+}
+
+async function doActivate() {
+  const key = document.getElementById('lic-key-input').value.trim();
+  const btn = document.getElementById('gate-btn');
+  const errEl = document.getElementById('gate-err');
+  if (!key) { showGateErr('Please enter your license key.'); return; }
+  if (!window.__spcFirebaseReady) { showGateErr('Connecting to server, please wait a moment...'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  errEl.classList.remove('show');
+  try {
+    const r = await window.__spcValidate(key);
+    if (r.valid) {
+      _licData = { key, ...r.data };
+      sessionStorage.setItem(_SESS, JSON.stringify({
+        key, company:r.data.company, customerName:r.data.customerName,
+        expiryDate:r.data.expiryDate?.toString(), readOnly:r.readOnly, ts:Date.now()
+      }));
+      unlockApp(r.readOnly, r.data);
+    } else {
+      const msgs = {
+        INVALID_KEY: 'License key not found. Check the key and try again.',
+        REVOKED:     'This license has been revoked. Contact your administrator.',
+        OFFLINE:     'Cannot reach license server. An internet connection is required.',
+        NO_KEY:      'Please enter your license key.',
+        ERROR:       'Verification error. Please try again.'
+      };
+      showGateErr(msgs[r.reason] || 'License validation failed.');
+    }
+  } catch(e) {
+    showGateErr('Connection error. Check your internet and try again.');
+  } finally {
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+function showGateErr(msg) {
+  document.getElementById('gate-err-msg').textContent = msg;
+  document.getElementById('gate-err').classList.add('show');
+}
+
+function unlockApp(readOnly, data) {
+  document.getElementById('license-gate').style.display = 'none';
+  _isRO = readOnly;
+  if (readOnly) {
+    applyReadOnly(data);
+  } else {
+    const chip = document.getElementById('lic-chip');
+    chip.classList.add('visible');
+    document.getElementById('chip-co').textContent = data.company || data.customerName || 'Licensed';
+    const exp = data.expiryDate instanceof Date ? data.expiryDate : new Date(data.expiryDate);
+    const dl = Math.ceil((exp - new Date()) / 86400000);
+    document.getElementById('chip-exp').textContent = 'Expires ' + exp.toLocaleDateString('en-IN') + ' (' + dl + 'd)';
+  }
+  // Show Admin button if role is admin
+  if (data.role === 'admin' || data.isAdmin === true) {
+    const adminBtn = document.getElementById('btn-admin');
+    if (adminBtn) adminBtn.style.display = 'inline-flex';
+  }
+}
+
+function applyReadOnly(data) {
+  _isRO = true;
+  const ban = document.getElementById('ro-banner');
+  ban.classList.add('visible');
+  document.body.classList.add('has-ro-banner');
+  const exp = data.expiryDate instanceof Date ? data.expiryDate : new Date(data.expiryDate);
+  document.getElementById('ro-expiry').textContent = exp.toLocaleDateString('en-IN');
+  // Disable all action buttons
+  document.querySelectorAll('.btn-green, .btn-primary').forEach(b => { b.disabled = true; b.style.opacity = '0.35'; b.style.cursor = 'not-allowed'; });
+}
+
+function guardAction() {
+  if (_isRO) {
+    notify('⚠ Read-only mode — license expired. Contact administrator to renew.', 'error');
+    return false;
+  }
+  return true;
+}
+
+function licLogout() {
+  sessionStorage.removeItem(_SESS);
+  location.reload();
+}
+
+function openLicModal() {
+  if (!_licData) return;
+  const exp = _licData.expiryDate instanceof Date ? _licData.expiryDate : new Date(_licData.expiryDate);
+  const iss = _licData.issuedDate ? new Date(_licData.issuedDate) : null;
+  document.getElementById('lic-modal-body').innerHTML = [
+    ['License Key', _licData.key],
+    ['Company', _licData.company || '—'],
+    ['Customer', _licData.customerName || '—'],
+    ['Email', _licData.email || '—'],
+    ['Issued', iss ? iss.toLocaleDateString('en-IN') : '—'],
+    ['Expires', exp.toLocaleDateString('en-IN')],
+    ['Features', (_licData.features||['All']).join(', ')],
+    ['Status', _isRO ? '⚠ EXPIRED' : '✓ Active'],
+  ].map(([l,v]) => `<div class="lic-row"><span class="lic-row-label">${l}</span><span class="lic-row-val">${v}</span></div>`).join('');
+  document.getElementById('lic-modal').classList.add('open');
+}
+
+// Session revalidation on load
+document.addEventListener('DOMContentLoaded', () => {
+  const trySession = () => {
+    const sess = sessionStorage.getItem(_SESS);
+    if (sess) {
+      try {
+        const s = JSON.parse(sess);
+        if (window.__spcFirebaseReady) {
+          revalidateSession(s.key);
+        } else {
+          document.addEventListener('firebase-ready', () => revalidateSession(s.key), {once:true});
+        }
+      } catch(e) { sessionStorage.removeItem(_SESS); }
+    }
+  };
+  trySession();
+});
+
+async function revalidateSession(key) {
+  try {
+    const r = await window.__spcValidate(key);
+    if (r.valid) {
+      _licData = { key, ...r.data };
+      unlockApp(r.readOnly, r.data);
+    } else {
+      sessionStorage.removeItem(_SESS);
+    }
+  } catch(e) { /* gate stays visible */ }
+}
+
+document.getElementById('lic-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('lic-modal'))
+    document.getElementById('lic-modal').classList.remove('open');
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  ADMIN PANEL
+// ═══════════════════════════════════════════════════════════════
+let _allUsers = [], _allLicenses = [];
+
+function openAdminPanel() {
+  document.getElementById('admin-overlay').classList.add('open');
+  const y = new Date(); y.setFullYear(y.getFullYear()+1);
+  document.getElementById('nl-expiry').value = y.toISOString().split('T')[0];
+}
+function closeAdmin() {
+  document.getElementById('admin-overlay').classList.remove('open');
+}
+function switchAdminTab(tab, btn) {
+  document.querySelectorAll('.admin-tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.admin-section').forEach(s=>s.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('atab-'+tab).classList.add('active');
+}
+
+// ── USER MANAGEMENT ──
+async function createUser() {
+  const name  = document.getElementById('nu-name').value.trim();
+  const email = document.getElementById('nu-email').value.trim();
+  if (!name)  { notify('Full name is required.', 'error'); return; }
+  if (!email) { notify('Email is required.', 'error'); return; }
+  if (!window.__spcCreateUser) { notify('Firebase not ready.', 'error'); return; }
+  notify('Creating user…', 'success');
+  const res = await window.__spcCreateUser({
+    name, email,
+    role:       document.getElementById('nu-role').value,
+    department: document.getElementById('nu-dept').value.trim(),
+    phone:      document.getElementById('nu-phone').value.trim(),
+    licenseKey: document.getElementById('nu-lickey').value.trim(),
+    notes:      document.getElementById('nu-notes').value.trim(),
+  });
+  if (res.success) {
+    notify('✓ User created: ' + name, 'success');
+    ['nu-name','nu-email','nu-dept','nu-phone','nu-lickey','nu-notes'].forEach(id => document.getElementById(id).value='');
+    document.getElementById('nu-role').value = 'user';
+    loadUsers();
+  } else {
+    notify('Error: ' + res.error, 'error');
+  }
+}
+
+async function loadUsers() {
+  if (!window.__spcListUsers) { notify('Firebase not ready.', 'error'); return; }
+  document.getElementById('users-list').innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">Loading…</div>';
+  _allUsers = await window.__spcListUsers();
+  renderUsers(_allUsers);
+}
+
+function renderUsers(users) {
+  const el = document.getElementById('users-list');
+  if (!users.length) {
+    el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">No users found.</div>';
+    return;
+  }
+  el.innerHTML = users.map(u => `
+    <div class="user-card">
+      <div class="user-card-info">
+        <div class="user-card-name">
+          ${u.name||'—'}
+          <span class="u-badge ${u.role==='admin'?'badge-admin':'badge-active'}">${u.role||'user'}</span>
+          <span class="u-badge ${u.isActive!==false?'badge-active':'badge-inactive'}">${u.isActive!==false?'Active':'Inactive'}</span>
+        </div>
+        <div class="user-card-meta">📧 ${u.email||'—'} · 🏢 ${u.department||'—'} · 📱 ${u.phone||'—'}</div>
+        ${u.licenseKey ? `<div class="user-card-meta" style="color:var(--accent3)">🔑 ${u.licenseKey}</div>` : ''}
+        ${u.notes     ? `<div class="user-card-meta">📝 ${u.notes}</div>` : ''}
+      </div>
+      <div class="user-card-actions">
+        <button class="btn btn-sm" onclick="toggleUserActive('${u.id}',${u.isActive!==false})">${u.isActive!==false?'Deactivate':'Activate'}</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.id}','${(u.name||u.email||'').replace(/'/g,'')}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+function filterUsers() {
+  const q = document.getElementById('user-search').value.toLowerCase();
+  renderUsers(_allUsers.filter(u =>
+    (u.name||'').toLowerCase().includes(q) || (u.email||'').toLowerCase().includes(q)
+  ));
+}
+
+async function toggleUserActive(id, current) {
+  const res = await window.__spcUpdateUser(id, { isActive: !current });
+  if (res.success) { notify('User status updated.', 'success'); loadUsers(); }
+  else notify('Error: ' + res.error, 'error');
+}
+
+async function deleteUser(id, name) {
+  if (!confirm('Delete user "' + name + '"? This cannot be undone.')) return;
+  const res = await window.__spcDeleteUser(id);
+  if (res.success) { notify('User deleted.', 'success'); loadUsers(); }
+  else notify('Error: ' + res.error, 'error');
+}
+
+// ── LICENSE MANAGEMENT ──
+async function createLicense() {
+  const company = document.getElementById('nl-company').value.trim();
+  const expiry  = document.getElementById('nl-expiry').value;
+  if (!company) { notify('Company name is required.', 'error'); return; }
+  if (!expiry)  { notify('Expiry date is required.', 'error'); return; }
+  if (!window.__spcCreateLicense) { notify('Firebase not ready.', 'error'); return; }
+  const customKey = document.getElementById('nl-customkey').value.trim().toUpperCase().replace(/[^A-Z0-9-]/g,'');
+  notify('Generating license…', 'success');
+  const res = await window.__spcCreateLicense({
+    company,
+    customerName: document.getElementById('nl-customer').value.trim(),
+    email:        document.getElementById('nl-email').value.trim(),
+    expiryDate:   new Date(expiry).toISOString(),
+    maxUsers:     parseInt(document.getElementById('nl-maxusers').value)||5,
+    notes:        document.getElementById('nl-notes').value.trim(),
+    ...(customKey ? { key: customKey } : {})
+  });
+  if (res.success) {
+    notify('✓ License created: ' + res.key, 'success');
+    document.getElementById('gen-key-out').textContent   = res.key;
+    document.getElementById('gen-key-out').style.display  = 'block';
+    document.getElementById('copy-key-btn').style.display = 'inline-flex';
+    loadLicenses();
+  } else {
+    notify('Error: ' + res.error, 'error');
+  }
+}
+
+function copyLicKey() {
+  const key = document.getElementById('gen-key-out').textContent;
+  navigator.clipboard.writeText(key).then(() => notify('Key copied!', 'success'));
+}
+
+async function loadLicenses() {
+  if (!window.__spcListLicenses) { notify('Firebase not ready.', 'error'); return; }
+  document.getElementById('licenses-list').innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">Loading…</div>';
+  _allLicenses = await window.__spcListLicenses();
+  renderLicenses(_allLicenses);
+}
+
+function renderLicenses(lics) {
+  const el = document.getElementById('licenses-list');
+  if (!lics.length) {
+    el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">No licenses found.</div>';
+    return;
+  }
+  el.innerHTML = lics.map(l => {
+    const exp = l.expiryDate ? new Date(l.expiryDate.seconds ? l.expiryDate.seconds*1000 : l.expiryDate) : null;
+    const expired = exp && exp < new Date();
+    const daysLeft = exp ? Math.ceil((exp - new Date()) / 86400000) : null;
+    const statusLabel = !l.isActive ? 'Revoked' : expired ? 'Expired' : 'Active';
+    const statusCls   = !l.isActive || expired ? 'badge-inactive' : 'badge-active';
+    return `<div class="lic-card">
+      <div style="flex:1;min-width:0">
+        <div class="lic-card-key">${l.id||l.key||'—'}
+          <span class="u-badge ${statusCls}" style="font-family:'DM Sans',sans-serif">${statusLabel}</span>
+        </div>
+        <div class="lic-card-meta">🏢 ${l.company||'—'} · 👤 ${l.customerName||'—'} · 📧 ${l.email||'—'}</div>
+        <div class="lic-card-meta">📅 Expires: ${exp?exp.toLocaleDateString('en-IN'):'—'} ${daysLeft!=null?'('+(daysLeft>0?daysLeft+'d left':'expired')+')':''} · 👥 Max: ${l.maxUsers||'—'} · Activations: ${l.activationCount||0}</div>
+        ${l.notes ? `<div class="lic-card-meta">📝 ${l.notes}</div>` : ''}
+      </div>
+      <div class="lic-card-actions">
+        <button class="btn btn-sm" title="Copy key" onclick="navigator.clipboard.writeText('${l.id||l.key||''}').then(()=>notify('Key copied!','success'))">📋</button>
+        <button class="btn btn-sm" onclick="toggleLicenseActive('${l.id}',${!!l.isActive})">${l.isActive?'Revoke':'Restore'}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterLicenses() {
+  const q = document.getElementById('lic-search').value.toLowerCase();
+  renderLicenses(_allLicenses.filter(l =>
+    (l.id||'').toLowerCase().includes(q) || (l.company||'').toLowerCase().includes(q)
+  ));
+}
+
+async function toggleLicenseActive(id, current) {
+  if (!window.__spcUpdateLicense) { notify('Firebase not ready.', 'error'); return; }
+  const res = await window.__spcUpdateLicense(id, { isActive: !current });
+  if (res.success) { notify('License status updated.', 'success'); loadLicenses(); }
+  else notify('Error: ' + res.error, 'error');
+}
+
+</script>
+
+<!-- ═══════════════════════════════════════════════
+     ADMIN PANEL
+     ═══════════════════════════════════════════════ -->
+<div class="admin-overlay" id="admin-overlay" onclick="if(event.target===this)closeAdmin()">
+  <div class="admin-modal">
+    <div class="admin-header">
+      <h2>🛡 Admin Panel <span style="font-size:11px;font-weight:400;color:var(--text3);margin-left:4px">— Manage Users &amp; Licenses</span></h2>
+      <button class="btn btn-sm btn-danger" onclick="closeAdmin()">✕ Close</button>
+    </div>
+    <div class="admin-tab-bar">
+      <button class="admin-tab-btn active" onclick="switchAdminTab('users',this)">👥 Users</button>
+      <button class="admin-tab-btn" onclick="switchAdminTab('licenses',this)">🔑 Licenses</button>
+    </div>
+    <div class="admin-body">
+
+      <!-- ── USERS TAB ── -->
+      <div id="atab-users" class="admin-section active">
+        <div class="admin-divider">Create New User</div>
+        <div class="admin-form-grid">
+          <div class="admin-fg">
+            <span class="admin-label">Full Name *</span>
+            <input class="admin-input" id="nu-name" placeholder="e.g. Rahul Sharma">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Email *</span>
+            <input class="admin-input" id="nu-email" type="email" placeholder="user@company.com">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Role</span>
+            <select class="admin-input" id="nu-role">
+              <option value="user">User</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Department</span>
+            <input class="admin-input" id="nu-dept" placeholder="e.g. Quality Control">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Phone</span>
+            <input class="admin-input" id="nu-phone" placeholder="+91 98765 43210">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">License Key</span>
+            <input class="admin-input" id="nu-lickey" placeholder="Assign a license key" style="font-family:'DM Mono',monospace;letter-spacing:1px">
+          </div>
+        </div>
+        <div class="admin-fg" style="margin-bottom:12px">
+          <span class="admin-label">Notes</span>
+          <input class="admin-input" id="nu-notes" placeholder="Optional notes">
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:4px">
+          <button class="btn btn-green" onclick="createUser()">➕ Create User</button>
+        </div>
+
+        <div class="admin-divider">All Users</div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <input class="admin-input" id="user-search" placeholder="🔍  Search by name or email…" oninput="filterUsers()" style="flex:1">
+          <button class="btn btn-sm" onclick="loadUsers()">↻ Refresh</button>
+        </div>
+        <div id="users-list">
+          <div style="text-align:center;color:var(--text3);padding:30px;font-size:12px">Click Refresh to load users.</div>
+        </div>
+      </div>
+
+      <!-- ── LICENSES TAB ── -->
+      <div id="atab-licenses" class="admin-section">
+        <div class="admin-divider">Generate New License</div>
+        <div class="admin-form-grid">
+          <div class="admin-fg">
+            <span class="admin-label">Company Name *</span>
+            <input class="admin-input" id="nl-company" placeholder="e.g. Polyplastics Industries">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Customer Name</span>
+            <input class="admin-input" id="nl-customer" placeholder="Contact person name">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Email</span>
+            <input class="admin-input" id="nl-email" type="email" placeholder="contact@company.com">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Expiry Date *</span>
+            <input class="admin-input" id="nl-expiry" type="date">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Max Users</span>
+            <input class="admin-input" id="nl-maxusers" type="number" min="1" value="5">
+          </div>
+          <div class="admin-fg">
+            <span class="admin-label">Custom Key (optional)</span>
+            <input class="admin-input" id="nl-customkey" placeholder="Auto-generated if blank" style="font-family:'DM Mono',monospace;letter-spacing:1px">
+          </div>
+        </div>
+        <div class="admin-fg" style="margin-bottom:12px">
+          <span class="admin-label">Notes</span>
+          <input class="admin-input" id="nl-notes" placeholder="Optional license notes">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+          <button class="btn btn-green" onclick="createLicense()">🔑 Generate &amp; Save License</button>
+          <div class="gen-key-display" id="gen-key-out" style="display:none"></div>
+          <button class="btn btn-sm" id="copy-key-btn" onclick="copyLicKey()" style="display:none">📋 Copy</button>
+        </div>
+
+        <div class="admin-divider">All Licenses</div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <input class="admin-input" id="lic-search" placeholder="🔍  Search by key or company…" oninput="filterLicenses()" style="flex:1">
+          <button class="btn btn-sm" onclick="loadLicenses()">↻ Refresh</button>
+        </div>
+        <div id="licenses-list">
+          <div style="text-align:center;color:var(--text3);padding:30px;font-size:12px">Click Refresh to load licenses.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
