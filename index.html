@@ -28,7 +28,14 @@
   const auth = getAuth(app);
 
   // Sign in anonymously so request.auth != null — required by Firestore write rules
-  await signInAnonymously(auth).catch(e => console.warn('Auth warning:', e.message));
+  try {
+    await signInAnonymously(auth);
+  } catch(e) {
+    console.error('Anonymous auth failed — Firestore writes will be blocked:', e.message);
+    // Dispatch a custom event so the UI can show a meaningful error
+    document.dispatchEvent(new CustomEvent('firebase-auth-failed', { detail: e.message }));
+    return; // Stop init — do NOT set __spcFirebaseReady
+  }
 
   async function validateLicense(key) {
     if (!key || !key.trim()) return { valid:false, reason:'NO_KEY' };
@@ -2162,6 +2169,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   };
   trySession();
+
+  // Show a visible error if anonymous auth failed (causes "client is offline" on Firestore writes)
+  document.addEventListener('firebase-auth-failed', (e) => {
+    const msg = 'Firebase authentication failed — license operations unavailable. Check your Firebase config and Auth settings. (' + (e.detail || '') + ')';
+    if (typeof notify === 'function') notify(msg, 'error');
+    else console.error(msg);
+  });
 });
 
 async function revalidateSession(key) {
@@ -2285,7 +2299,7 @@ async function createLicense() {
   const expiry  = document.getElementById('nl-expiry').value;
   if (!company) { notify('Company name is required.', 'error'); return; }
   if (!expiry)  { notify('Expiry date is required.', 'error'); return; }
-  if (!window.__spcCreateLicense) { notify('Firebase not ready.', 'error'); return; }
+  if (!window.__spcFirebaseReady || !window.__spcCreateLicense) { notify('Still connecting to server — please wait a moment and try again.', 'error'); return; }
   const customKey = document.getElementById('nl-customkey').value.trim().toUpperCase().replace(/[^A-Z0-9-]/g,'');
   notify('Generating license…', 'success');
   const res = await window.__spcCreateLicense({
