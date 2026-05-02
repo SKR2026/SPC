@@ -28,14 +28,7 @@
   const auth = getAuth(app);
 
   // Sign in anonymously so request.auth != null — required by Firestore write rules
-  try {
-    await signInAnonymously(auth);
-  } catch(e) {
-    console.error('Anonymous auth failed — Firestore writes will be blocked:', e.message);
-    // Dispatch a custom event so the UI can show a meaningful error
-    document.dispatchEvent(new CustomEvent('firebase-auth-failed', { detail: e.message }));
-    return; // Stop init — do NOT set __spcFirebaseReady
-  }
+  try { await signInAnonymously(auth); } catch(e) { console.error('Auth failed:', e.message); }
 
   async function validateLicense(key) {
     if (!key || !key.trim()) return { valid:false, reason:'NO_KEY' };
@@ -79,12 +72,7 @@
         isActive: true
       });
       return { success: true, id };
-    } catch(e) {
-      let msg = e.message || 'Unknown error';
-      if (e.code === 'permission-denied') msg = 'Permission denied — check Firestore security rules for the "users" collection.';
-      console.error('createUser error:', e.code, e.message);
-      return { success: false, error: msg };
-    }
+    } catch(e) { return { success: false, error: e.message }; }
   };
 
   // ── ADMIN: Update user ─────────────────────────────────
@@ -123,14 +111,7 @@
         createdAt: serverTimestamp()
       });
       return { success: true, key };
-    } catch(e) {
-      let msg = e.message || 'Unknown error';
-      if (e.code === 'permission-denied') msg = 'Permission denied — your Firestore security rules are blocking writes. Allow authenticated writes to the "licenses" collection.';
-      else if (e.code === 'unavailable' || msg.includes('offline')) msg = 'Firestore unavailable — check your Firebase project ID and network connection.';
-      else if (e.code === 'unauthenticated') msg = 'Not authenticated — anonymous sign-in may have failed. Refresh the page and try again.';
-      console.error('createLicense error:', e.code, e.message);
-      return { success: false, error: msg, code: e.code };
-    }
+    } catch(e) { return { success: false, error: e.message }; }
   };
 
   // ── ADMIN: Update license ──────────────────────────────
@@ -142,41 +123,6 @@
   };
 
   window.__spcValidate = validateLicense;
-
-  // Fetch custom admin password from Firestore dev_config/settings (optional)
-  window.__spcGetAdminPassword = async function() {
-    try {
-      const snap = await getDoc(doc(db, 'dev_config', 'settings'));
-      return snap.exists() ? snap.data().adminPassword || null : null;
-    } catch(e) { return null; }
-  };
-
-  // ── DIAGNOSTIC: Test Firestore read/write access ─────
-  window.__spcDiagnose = async function() {
-    const results = { auth: false, read: false, write: false, errors: [] };
-    // Check auth
-    const user = auth.currentUser;
-    if (user) { results.auth = true; results.uid = user.uid; }
-    else { results.errors.push('Not authenticated — anonymous sign-in failed.'); }
-    // Test write
-    try {
-      const testRef = doc(db, 'licenses', '__diag_test__');
-      await setDoc(testRef, { test: true, ts: serverTimestamp() });
-      results.write = true;
-      await deleteDoc(testRef).catch(()=>{});
-    } catch(e) {
-      results.errors.push('WRITE failed (' + (e.code||'?') + '): ' + e.message);
-    }
-    // Test read
-    try {
-      await getDocs(collection(db, 'licenses'));
-      results.read = true;
-    } catch(e) {
-      results.errors.push('READ failed (' + (e.code||'?') + '): ' + e.message);
-    }
-    return results;
-  };
-
   window.__spcFirebaseReady = true;
   document.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -1038,28 +984,30 @@ body.has-ro-banner .app-layout { height:calc(100vh - var(--header-h) - 36px); }
     <div class="gate-logo">
       <div class="gate-logo-badge">SPC</div>
       <div class="gate-logo-text">
-        <h1>SPC Admin Panel</h1>
-        <p>License Management — Administrator Access</p>
+        <h1>SPC Analysis Suite</h1>
+        <p>X̄ &amp; R Chart — Statistical Process Control</p>
       </div>
     </div>
-    <div class="gate-label">Admin Password</div>
-    <div class="gate-sub">Enter the administrator password to access the license management panel.</div>
+    <div class="gate-label">Enter License Key to continue</div>
+    <div class="gate-sub">Your license key was provided by your software administrator.<br>Contact support if you do not have one.</div>
+    <div class="gate-hint">Format: <code>SPC-XXXX-XXXX-XXXX</code></div>
     <div class="gate-input-wrap">
-      <input class="gate-input" id="lic-key-input" type="password"
-        placeholder="Enter admin password"
-        onkeydown="if(event.key==='Enter')doActivate()">
-      <span class="gate-icon">🔐</span>
+      <input class="gate-input" id="lic-key-input" type="text" maxlength="19"
+        placeholder="SPC-XXXX-XXXX-XXXX"
+        oninput="fmtGateKey(this)" onkeydown="if(event.key==='Enter')doActivate()">
+      <span class="gate-icon">🔑</span>
     </div>
     <div class="gate-error" id="gate-err">
-      <span>⚠</span><span id="gate-err-msg">Incorrect password.</span>
+      <span>⚠</span><span id="gate-err-msg">Invalid license key.</span>
     </div>
     <button class="gate-btn" id="gate-btn" onclick="doActivate()" style="margin-top:14px">
       <div class="gate-spinner"></div>
-      <span class="btn-lbl">🔓 Login</span>
+      <span class="btn-lbl">🔓 Activate License</span>
     </button>
     <div class="gate-footer">
-      Default password: <code>SPC@Admin2024</code><br>
-      Change it in Firebase → Firestore → <code>dev_config/settings</code> → <code>adminPassword</code>
+      <strong>Offline use is not supported.</strong><br>
+      An active internet connection is required to validate your license.<br>
+      License is verified against our secure server on every session.
     </div>
   </div>
 </div>
@@ -2098,45 +2046,35 @@ function fmtGateKey(el) {
   el.value = o;
 }
 
-// ── Password gate (SHA-256 based, same approach as MSA Developer) ──
-const _ADMIN_PASS_KEY = 'spc_admin_pass_hash';
-const _DEFAULT_ADMIN_PASS = 'SPC@Admin2024';
-
-async function sha256(msg) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-}
-
-// Fetch admin password hash from Firestore (dev_config/settings.adminPassword)
-// Falls back to default if Firestore not ready or not set
-async function getAdminPasswordHash() {
-  try {
-    if (window.__spcGetAdminPassword) {
-      const pw = await window.__spcGetAdminPassword();
-      if (pw) return await sha256(pw);
-    }
-  } catch(e) { /* fall through to default */ }
-  return await sha256(_DEFAULT_ADMIN_PASS);
-}
-
 async function doActivate() {
-  const pass = document.getElementById('lic-key-input').value;
-  const btn  = document.getElementById('gate-btn');
-  if (!pass) { showGateErr('Please enter the admin password.'); return; }
+  const key = document.getElementById('lic-key-input').value.trim();
+  const btn = document.getElementById('gate-btn');
+  const errEl = document.getElementById('gate-err');
+  if (!key) { showGateErr('Please enter your license key.'); return; }
+  if (!window.__spcFirebaseReady) { showGateErr('Connecting to server, please wait a moment...'); return; }
   btn.classList.add('loading'); btn.disabled = true;
-  document.getElementById('gate-err').classList.remove('show');
+  errEl.classList.remove('show');
   try {
-    const inputHash  = await sha256(pass);
-    const correctHash = await getAdminPasswordHash();
-    if (inputHash === correctHash) {
-      sessionStorage.setItem(_SESS, JSON.stringify({ ts: Date.now() }));
-      unlockApp(false, { company: 'Admin', customerName: 'Admin' });
+    const r = await window.__spcValidate(key);
+    if (r.valid) {
+      _licData = { key, ...r.data };
+      sessionStorage.setItem(_SESS, JSON.stringify({
+        key, company:r.data.company, customerName:r.data.customerName,
+        expiryDate:r.data.expiryDate?.toString(), readOnly:r.readOnly, ts:Date.now()
+      }));
+      unlockApp(r.readOnly, r.data);
     } else {
-      showGateErr('Incorrect password. Access denied.');
-      document.getElementById('lic-key-input').value = '';
+      const msgs = {
+        INVALID_KEY: 'License key not found. Check the key and try again.',
+        REVOKED:     'This license has been revoked. Contact your administrator.',
+        OFFLINE:     'Cannot reach license server. An internet connection is required.',
+        NO_KEY:      'Please enter your license key.',
+        ERROR:       'Verification error. Please try again.'
+      };
+      showGateErr(msgs[r.reason] || 'License validation failed.');
     }
   } catch(e) {
-    showGateErr('Error: ' + e.message);
+    showGateErr('Connection error. Check your internet and try again.');
   } finally {
     btn.classList.remove('loading'); btn.disabled = false;
   }
@@ -2216,33 +2154,26 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const s = JSON.parse(sess);
         if (window.__spcFirebaseReady) {
-          revalidateSession();
+          revalidateSession(s.key);
         } else {
-          document.addEventListener('firebase-ready', () => revalidateSession(), {once:true});
+          document.addEventListener('firebase-ready', () => revalidateSession(s.key), {once:true});
         }
       } catch(e) { sessionStorage.removeItem(_SESS); }
     }
   };
   trySession();
-
-  // Show a visible error if anonymous auth failed (causes "client is offline" on Firestore writes)
-  document.addEventListener('firebase-auth-failed', (e) => {
-    const msg = 'Firebase authentication failed — license operations unavailable. Check your Firebase config and Auth settings. (' + (e.detail || '') + ')';
-    if (typeof notify === 'function') notify(msg, 'error');
-    else console.error(msg);
-  });
 });
 
-async function revalidateSession() {
-  // Password gate — session is valid if it exists and is less than 8 hours old
+async function revalidateSession(key) {
   try {
-    const sess = JSON.parse(sessionStorage.getItem(_SESS) || 'null');
-    if (sess && sess.ts && (Date.now() - sess.ts) < 8 * 60 * 60 * 1000) {
-      unlockApp(false, { company: 'Admin', customerName: 'Admin' });
+    const r = await window.__spcValidate(key);
+    if (r.valid) {
+      _licData = { key, ...r.data };
+      unlockApp(r.readOnly, r.data);
     } else {
       sessionStorage.removeItem(_SESS);
     }
-  } catch(e) { sessionStorage.removeItem(_SESS); }
+  } catch(e) { /* gate stays visible */ }
 }
 
 document.getElementById('lic-modal').addEventListener('click', e => {
@@ -2354,7 +2285,7 @@ async function createLicense() {
   const expiry  = document.getElementById('nl-expiry').value;
   if (!company) { notify('Company name is required.', 'error'); return; }
   if (!expiry)  { notify('Expiry date is required.', 'error'); return; }
-  if (!window.__spcFirebaseReady || !window.__spcCreateLicense) { notify('Still connecting to server — please wait a moment and try again.', 'error'); return; }
+  if (!window.__spcCreateLicense) { notify('Firebase not ready.', 'error'); return; }
   const customKey = document.getElementById('nl-customkey').value.trim().toUpperCase().replace(/[^A-Z0-9-]/g,'');
   notify('Generating license…', 'success');
   const res = await window.__spcCreateLicense({
@@ -2375,36 +2306,6 @@ async function createLicense() {
   } else {
     notify('Error: ' + res.error, 'error');
   }
-}
-
-async function runDiagnostic() {
-  const out = document.getElementById('diag-out');
-  out.style.display = 'block';
-  out.style.borderColor = 'var(--border)';
-  out.innerHTML = '⏳ Running connection test…';
-  if (!window.__spcDiagnose) {
-    out.innerHTML = '❌ Firebase not initialised — check your firebaseConfig values (apiKey, projectId, appId).';
-    out.style.borderColor = '#f87171';
-    return;
-  }
-  const r = await window.__spcDiagnose();
-  const ok = '✅', fail = '❌', warn = '⚠️';
-  let html = '';
-  html += (r.auth  ? ok : fail) + ' Anonymous Auth: ' + (r.auth  ? 'OK (uid: ' + r.uid + ')' : 'FAILED') + '<br>';
-  html += (r.read  ? ok : fail) + ' Firestore READ:  ' + (r.read  ? 'OK' : 'FAILED') + '<br>';
-  html += (r.write ? ok : fail) + ' Firestore WRITE: ' + (r.write ? 'OK' : 'FAILED') + '<br>';
-  if (r.errors.length) {
-    html += '<br><b>Errors:</b><br>' + r.errors.map(e => '  • ' + e).join('<br>');
-    html += '<br><br><b>Fix checklist:</b><br>';
-    if (!r.auth)  html += '  → Firebase Console → Authentication → Sign-in methods → Enable <b>Anonymous</b><br>';
-    if (!r.write) html += '  → Firebase Console → Firestore → Rules → allow write for <code>request.auth != null</code><br>';
-    if (!r.read)  html += '  → Firebase Console → Firestore → Rules → allow read for <code>request.auth != null</code><br>';
-    out.style.borderColor = '#f87171';
-  } else {
-    html += '<br>✅ All checks passed — license generation should work.';
-    out.style.borderColor = '#4ade80';
-  }
-  out.innerHTML = html;
 }
 
 function copyLicKey() {
@@ -2562,13 +2463,11 @@ async function toggleLicenseActive(id, current) {
           <span class="admin-label">Notes</span>
           <input class="admin-input" id="nl-notes" placeholder="Optional license notes">
         </div>
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
           <button class="btn btn-green" onclick="createLicense()">🔑 Generate &amp; Save License</button>
-          <button class="btn btn-sm" onclick="runDiagnostic()" title="Test Firestore connection &amp; permissions">🔬 Test Connection</button>
           <div class="gen-key-display" id="gen-key-out" style="display:none"></div>
           <button class="btn btn-sm" id="copy-key-btn" onclick="copyLicKey()" style="display:none">📋 Copy</button>
         </div>
-        <div id="diag-out" style="display:none;margin:8px 0;padding:10px 14px;border-radius:8px;font-size:12px;font-family:'DM Mono',monospace;line-height:1.7;background:var(--bg2);border:1px solid var(--border)"></div>
 
         <div class="admin-divider">All Licenses</div>
         <div style="display:flex;gap:8px;margin-bottom:12px">
