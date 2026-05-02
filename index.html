@@ -142,6 +142,15 @@
   };
 
   window.__spcValidate = validateLicense;
+
+  // Fetch custom admin password from Firestore dev_config/settings (optional)
+  window.__spcGetAdminPassword = async function() {
+    try {
+      const snap = await getDoc(doc(db, 'dev_config', 'settings'));
+      return snap.exists() ? snap.data().adminPassword || null : null;
+    } catch(e) { return null; }
+  };
+
   // ── DIAGNOSTIC: Test Firestore read/write access ─────
   window.__spcDiagnose = async function() {
     const results = { auth: false, read: false, write: false, errors: [] };
@@ -1029,30 +1038,28 @@ body.has-ro-banner .app-layout { height:calc(100vh - var(--header-h) - 36px); }
     <div class="gate-logo">
       <div class="gate-logo-badge">SPC</div>
       <div class="gate-logo-text">
-        <h1>SPC Analysis Suite</h1>
-        <p>X̄ &amp; R Chart — Statistical Process Control</p>
+        <h1>SPC Admin Panel</h1>
+        <p>License Management — Administrator Access</p>
       </div>
     </div>
-    <div class="gate-label">Enter License Key to continue</div>
-    <div class="gate-sub">Your license key was provided by your software administrator.<br>Contact support if you do not have one.</div>
-    <div class="gate-hint">Format: <code>SPC-XXXX-XXXX-XXXX</code></div>
+    <div class="gate-label">Admin Password</div>
+    <div class="gate-sub">Enter the administrator password to access the license management panel.</div>
     <div class="gate-input-wrap">
-      <input class="gate-input" id="lic-key-input" type="text" maxlength="19"
-        placeholder="SPC-XXXX-XXXX-XXXX"
-        oninput="fmtGateKey(this)" onkeydown="if(event.key==='Enter')doActivate()">
-      <span class="gate-icon">🔑</span>
+      <input class="gate-input" id="lic-key-input" type="password"
+        placeholder="Enter admin password"
+        onkeydown="if(event.key==='Enter')doActivate()">
+      <span class="gate-icon">🔐</span>
     </div>
     <div class="gate-error" id="gate-err">
-      <span>⚠</span><span id="gate-err-msg">Invalid license key.</span>
+      <span>⚠</span><span id="gate-err-msg">Incorrect password.</span>
     </div>
     <button class="gate-btn" id="gate-btn" onclick="doActivate()" style="margin-top:14px">
       <div class="gate-spinner"></div>
-      <span class="btn-lbl">🔓 Activate License</span>
+      <span class="btn-lbl">🔓 Login</span>
     </button>
     <div class="gate-footer">
-      <strong>Offline use is not supported.</strong><br>
-      An active internet connection is required to validate your license.<br>
-      License is verified against our secure server on every session.
+      Default password: <code>SPC@Admin2024</code><br>
+      Change it in Firebase → Firestore → <code>dev_config/settings</code> → <code>adminPassword</code>
     </div>
   </div>
 </div>
@@ -2091,35 +2098,45 @@ function fmtGateKey(el) {
   el.value = o;
 }
 
-async function doActivate() {
-  const key = document.getElementById('lic-key-input').value.trim();
-  const btn = document.getElementById('gate-btn');
-  const errEl = document.getElementById('gate-err');
-  if (!key) { showGateErr('Please enter your license key.'); return; }
-  if (!window.__spcFirebaseReady) { showGateErr('Connecting to server, please wait a moment...'); return; }
-  btn.classList.add('loading'); btn.disabled = true;
-  errEl.classList.remove('show');
+// ── Password gate (SHA-256 based, same approach as MSA Developer) ──
+const _ADMIN_PASS_KEY = 'spc_admin_pass_hash';
+const _DEFAULT_ADMIN_PASS = 'SPC@Admin2024';
+
+async function sha256(msg) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+// Fetch admin password hash from Firestore (dev_config/settings.adminPassword)
+// Falls back to default if Firestore not ready or not set
+async function getAdminPasswordHash() {
   try {
-    const r = await window.__spcValidate(key);
-    if (r.valid) {
-      _licData = { key, ...r.data };
-      sessionStorage.setItem(_SESS, JSON.stringify({
-        key, company:r.data.company, customerName:r.data.customerName,
-        expiryDate:r.data.expiryDate?.toString(), readOnly:r.readOnly, ts:Date.now()
-      }));
-      unlockApp(r.readOnly, r.data);
+    if (window.__spcGetAdminPassword) {
+      const pw = await window.__spcGetAdminPassword();
+      if (pw) return await sha256(pw);
+    }
+  } catch(e) { /* fall through to default */ }
+  return await sha256(_DEFAULT_ADMIN_PASS);
+}
+
+async function doActivate() {
+  const pass = document.getElementById('lic-key-input').value;
+  const btn  = document.getElementById('gate-btn');
+  if (!pass) { showGateErr('Please enter the admin password.'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  document.getElementById('gate-err').classList.remove('show');
+  try {
+    const inputHash  = await sha256(pass);
+    const correctHash = await getAdminPasswordHash();
+    if (inputHash === correctHash) {
+      sessionStorage.setItem(_SESS, JSON.stringify({ ts: Date.now() }));
+      unlockApp(false, { company: 'Admin', customerName: 'Admin' });
     } else {
-      const msgs = {
-        INVALID_KEY: 'License key not found. Check the key and try again.',
-        REVOKED:     'This license has been revoked. Contact your administrator.',
-        OFFLINE:     'Cannot reach license server. An internet connection is required.',
-        NO_KEY:      'Please enter your license key.',
-        ERROR:       'Verification error. Please try again.'
-      };
-      showGateErr(msgs[r.reason] || 'License validation failed.');
+      showGateErr('Incorrect password. Access denied.');
+      document.getElementById('lic-key-input').value = '';
     }
   } catch(e) {
-    showGateErr('Connection error. Check your internet and try again.');
+    showGateErr('Error: ' + e.message);
   } finally {
     btn.classList.remove('loading'); btn.disabled = false;
   }
@@ -2199,9 +2216,9 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const s = JSON.parse(sess);
         if (window.__spcFirebaseReady) {
-          revalidateSession(s.key);
+          revalidateSession();
         } else {
-          document.addEventListener('firebase-ready', () => revalidateSession(s.key), {once:true});
+          document.addEventListener('firebase-ready', () => revalidateSession(), {once:true});
         }
       } catch(e) { sessionStorage.removeItem(_SESS); }
     }
@@ -2216,16 +2233,16 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-async function revalidateSession(key) {
+async function revalidateSession() {
+  // Password gate — session is valid if it exists and is less than 8 hours old
   try {
-    const r = await window.__spcValidate(key);
-    if (r.valid) {
-      _licData = { key, ...r.data };
-      unlockApp(r.readOnly, r.data);
+    const sess = JSON.parse(sessionStorage.getItem(_SESS) || 'null');
+    if (sess && sess.ts && (Date.now() - sess.ts) < 8 * 60 * 60 * 1000) {
+      unlockApp(false, { company: 'Admin', customerName: 'Admin' });
     } else {
       sessionStorage.removeItem(_SESS);
     }
-  } catch(e) { /* gate stays visible */ }
+  } catch(e) { sessionStorage.removeItem(_SESS); }
 }
 
 document.getElementById('lic-modal').addEventListener('click', e => {
