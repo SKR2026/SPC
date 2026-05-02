@@ -2058,7 +2058,7 @@ async function doActivate() {
     const r = await window.__spcValidate(key);
     if (r.valid) {
       _licData = { key, ...r.data };
-      sessionStorage.setItem(_SESS, JSON.stringify({
+      localStorage.setItem(_SESS, JSON.stringify({
         key, company:r.data.company, customerName:r.data.customerName,
         expiryDate:r.data.expiryDate?.toString(), readOnly:r.readOnly, ts:Date.now()
       }));
@@ -2125,7 +2125,7 @@ function guardAction() {
 }
 
 function licLogout() {
-  sessionStorage.removeItem(_SESS);
+  localStorage.removeItem(_SESS);
   location.reload();
 }
 
@@ -2149,16 +2149,19 @@ function openLicModal() {
 // Session revalidation on load
 document.addEventListener('DOMContentLoaded', () => {
   const trySession = () => {
-    const sess = sessionStorage.getItem(_SESS);
+    const sess = localStorage.getItem(_SESS);
     if (sess) {
       try {
         const s = JSON.parse(sess);
+        // Expire saved session after 30 days — forces re-entry of key
+        const age = Date.now() - (s.ts || 0);
+        if (age > 30 * 24 * 60 * 60 * 1000) { localStorage.removeItem(_SESS); return; }
         if (window.__spcFirebaseReady) {
           revalidateSession(s.key);
         } else {
           document.addEventListener('firebase-ready', () => revalidateSession(s.key), {once:true});
         }
-      } catch(e) { sessionStorage.removeItem(_SESS); }
+      } catch(e) { localStorage.removeItem(_SESS); }
     }
   };
   trySession();
@@ -2171,7 +2174,7 @@ async function revalidateSession(key) {
       _licData = { key, ...r.data };
       unlockApp(r.readOnly, r.data);
     } else {
-      sessionStorage.removeItem(_SESS);
+      localStorage.removeItem(_SESS);
     }
   } catch(e) { /* gate stays visible */ }
 }
