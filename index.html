@@ -38,6 +38,7 @@
       const snap = await getDoc(ref);
       if (!snap.exists()) return { valid:false, reason:'INVALID_KEY' };
       const data = snap.data();
+      if (data.product && data.product !== 'SPC') return { valid:false, reason:'WRONG_PRODUCT', message:'This license key is not valid for SPC Suite.' };
       if (!data.isActive) return { valid:false, reason:'REVOKED', data };
       const now    = new Date();
       const expiry = data.expiryDate?.toDate ? data.expiryDate.toDate() : new Date(data.expiryDate);
@@ -2058,18 +2059,19 @@ async function doActivate() {
     const r = await window.__spcValidate(key);
     if (r.valid) {
       _licData = { key, ...r.data };
-      localStorage.setItem(_SESS, JSON.stringify({
+      sessionStorage.setItem(_SESS, JSON.stringify({
         key, company:r.data.company, customerName:r.data.customerName,
         expiryDate:r.data.expiryDate?.toString(), readOnly:r.readOnly, ts:Date.now()
       }));
       unlockApp(r.readOnly, r.data);
     } else {
       const msgs = {
-        INVALID_KEY: 'License key not found. Check the key and try again.',
-        REVOKED:     'This license has been revoked. Contact your administrator.',
-        OFFLINE:     'Cannot reach license server. An internet connection is required.',
-        NO_KEY:      'Please enter your license key.',
-        ERROR:       'Verification error. Please try again.'
+        INVALID_KEY:   'License key not found. Check the key and try again.',
+        WRONG_PRODUCT: 'This license key is not valid for SPC Suite.',
+        REVOKED:       'This license has been revoked. Contact your administrator.',
+        OFFLINE:       'Cannot reach license server. An internet connection is required.',
+        NO_KEY:        'Please enter your license key.',
+        ERROR:         'Verification error. Please try again.'
       };
       showGateErr(msgs[r.reason] || 'License validation failed.');
     }
@@ -2125,7 +2127,7 @@ function guardAction() {
 }
 
 function licLogout() {
-  localStorage.removeItem(_SESS);
+  sessionStorage.removeItem(_SESS);
   location.reload();
 }
 
@@ -2149,19 +2151,16 @@ function openLicModal() {
 // Session revalidation on load
 document.addEventListener('DOMContentLoaded', () => {
   const trySession = () => {
-    const sess = localStorage.getItem(_SESS);
+    const sess = sessionStorage.getItem(_SESS);
     if (sess) {
       try {
         const s = JSON.parse(sess);
-        // Expire saved session after 30 days — forces re-entry of key
-        const age = Date.now() - (s.ts || 0);
-        if (age > 30 * 24 * 60 * 60 * 1000) { localStorage.removeItem(_SESS); return; }
         if (window.__spcFirebaseReady) {
           revalidateSession(s.key);
         } else {
           document.addEventListener('firebase-ready', () => revalidateSession(s.key), {once:true});
         }
-      } catch(e) { localStorage.removeItem(_SESS); }
+      } catch(e) { sessionStorage.removeItem(_SESS); }
     }
   };
   trySession();
@@ -2174,7 +2173,7 @@ async function revalidateSession(key) {
       _licData = { key, ...r.data };
       unlockApp(r.readOnly, r.data);
     } else {
-      localStorage.removeItem(_SESS);
+      sessionStorage.removeItem(_SESS);
     }
   } catch(e) { /* gate stays visible */ }
 }
